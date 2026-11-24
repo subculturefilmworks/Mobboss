@@ -19,7 +19,12 @@ pub fn clip_id(file: &MediaFile) -> String {
         .as_deref()
         .filter(|s| !s.is_empty())
         .map(|uid| format!("uid:{uid}"))
-        .unwrap_or_else(|| format!("file:{}", file.path.to_string_lossy()))
+        .unwrap_or_else(|| {
+            format!(
+                "file:{}",
+                crate::paths::display(&file.path).to_string_lossy()
+            )
+        })
 }
 pub fn group(files: Vec<MediaFile>) -> Vec<Clip> {
     let mut groups: BTreeMap<String, Vec<MediaFile>> = BTreeMap::new();

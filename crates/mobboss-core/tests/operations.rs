@@ -86,7 +86,11 @@ fn collect_and_undo_restore_exact_media_and_keep_databases() {
     assert_eq!(out.completed, 6);
     assert_eq!(f.index.files(None).unwrap().len(), 6);
     assert!(f.root.join("Avid MediaFiles/MXF/1/msmFMID.pmr").exists());
-    let log = out.logs.iter().find(|p| p.starts_with(&f.data)).unwrap();
+    let log = out
+        .logs
+        .iter()
+        .find(|p| p.starts_with(mobboss_core::paths::canonical(&f.data).unwrap()))
+        .unwrap();
     let undo = ops::undo(
         &mut f.index,
         log,
@@ -221,11 +225,137 @@ fn undo_move_never_overwrites_an_occupied_original_path() {
 }
 #[cfg(unix)]
 #[test]
-fn symlink_destinations_are_rejected() {
+fn symlinks_inside_destination_trees_are_rejected() {
     let f = Fixture::new();
-    let alias = f._dir.path().join("alias");
-    std::os::unix::fs::symlink(&f.root, &alias).unwrap();
-    assert!(ops::prepare(&f.index, Operation::Copy, "Test", &[], Some(&alias)).is_err());
+    let outside = f._dir.path().join("outside");
+    fs::create_dir_all(outside.join("Test")).unwrap();
+    fs::create_dir_all(&f.dest).unwrap();
+    std::os::unix::fs::symlink(&outside, f.dest.join("Media By Project")).unwrap();
+    assert!(ops::prepare(&f.index, Operation::Copy, "Test", &[], Some(&f.dest)).is_err());
+}
+#[cfg(unix)]
+#[test]
+fn a_selected_volume_alias_is_resolved_before_copy_and_undo() {
+    let mut f = Fixture::new();
+    let actual = f._dir.path().join("private-volume");
+    fs::create_dir(&actual).unwrap();
+    let alias = f._dir.path().join("volume-alias");
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let p = ops::prepare(&f.index, Operation::Copy, "Test", &[], Some(&alias)).unwrap();
+    let actual = mobboss_core::paths::canonical(&actual).unwrap();
+    assert!(p.actions.iter().all(|a| a.dest.starts_with(&actual)));
+    let out = f.execute(&p);
+    assert_eq!(out.completed, 3);
+    assert_eq!(
+        ops::undo(
+            &mut f.index,
+            &out.logs[0],
+            &f.data,
+            &CancellationToken::default(),
+            |_| {}
+        )
+        .unwrap()
+        .completed,
+        3
+    );
+    assert!(p
+        .actions
+        .iter()
+        .all(|a| a.source.exists() && !a.dest.exists()));
+}
+#[cfg(unix)]
+#[test]
+fn a_symlink_inserted_inside_the_indexed_source_stays_prohibited() {
+    let f = Fixture::new();
+    let folder = f.root.join("Avid MediaFiles/MXF/1");
+    let actual = folder.with_file_name("original");
+    fs::rename(&folder, &actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &folder).unwrap();
+    let error = ops::prepare(&f.index, Operation::Copy, "Test", &[], Some(&f.dest)).unwrap_err();
+    assert!(error.to_string().contains("symlink paths prohibited"));
+    assert!(!f.dest.exists());
+}
+#[test]
+fn legacy_journal_spellings_resolve_against_canonical_index_paths() {
+    let mut f = Fixture::new();
+    let p = f.plan(Operation::Copy);
+    let out = f.execute(&p);
+    let row = ops::read_log(&out.logs[0])
+        .unwrap()
+        .into_iter()
+        .find(|r| r.status == "done")
+        .unwrap();
+    #[cfg(unix)]
+    let base = mobboss_core::paths::canonical(f._dir.path()).unwrap();
+    #[cfg(unix)]
+    let legacy_base = {
+        let alias = base.join("legacy-parent");
+        std::os::unix::fs::symlink(&base, &alias).unwrap();
+        alias
+    };
+    let legacy = |path: &Path| {
+        #[cfg(windows)]
+        {
+            format!(
+                r"\\?\{}",
+                path.to_string_lossy().to_uppercase().replace('\\', "/")
+            )
+        }
+        #[cfg(unix)]
+        {
+            legacy_base
+                .join(path.strip_prefix(&base).unwrap())
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    let log = f.data.join("legacy.csv");
+    let mut w = csv::Writer::from_path(&log).unwrap();
+    w.write_record([
+        "op", "source", "dest", "size", "checksum", "status", "guard",
+    ])
+    .unwrap();
+    for (source, dest, status) in [
+        (
+            row.source.to_string_lossy().into_owned(),
+            row.dest.to_string_lossy().into_owned(),
+            "published",
+        ),
+        (legacy(&row.source), legacy(&row.dest), "done"),
+    ] {
+        w.write_record([
+            row.op.clone(),
+            source,
+            dest,
+            row.size.to_string(),
+            row.checksum.clone(),
+            status.into(),
+            row.guard.clone(),
+        ])
+        .unwrap();
+    }
+    w.flush().unwrap();
+    let preview = ops::preview_undo(&f.index, &log).unwrap();
+    assert_eq!(
+        preview.rows.len(),
+        1,
+        "legacy forms must identify the same transfer"
+    );
+    assert!(!preview
+        .warnings
+        .iter()
+        .any(|w| w.contains("Not currently indexed")));
+    let undone = ops::undo(
+        &mut f.index,
+        &log,
+        &f.data,
+        &CancellationToken::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!((undone.completed, undone.skipped), (1, 0));
+    assert!(row.source.exists() && !row.dest.exists());
+    assert!(!fs::read_to_string(&out.logs[0]).unwrap().contains(r"\\?\"));
 }
 #[cfg(unix)]
 #[test]
@@ -255,7 +385,11 @@ fn cross_filesystem_move_verifies_before_delete_and_undo_restores() {
         assert_eq!(ops::checksum(&a.dest).unwrap(), expected[&a.dest]);
     }
     // A durable published (verified) entry precedes done (source removed) for every cross-device move.
-    let log = out.logs.iter().find(|p| p.starts_with(&f.data)).unwrap();
+    let log = out
+        .logs
+        .iter()
+        .find(|p| p.starts_with(mobboss_core::paths::canonical(&f.data).unwrap()))
+        .unwrap();
     let rows = ops::read_log(log).unwrap();
     for a in &p.actions {
         let states: Vec<_> = rows

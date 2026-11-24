@@ -11,7 +11,9 @@ use std::{
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(serialize_with = "mobboss_core::paths::serialize")]
     pub index: PathBuf,
+    #[serde(serialize_with = "mobboss_core::paths::serialize_many")]
     pub roots: Vec<PathBuf>,
     pub concurrency: usize,
 }
@@ -20,7 +22,14 @@ impl Settings {
         let index = default_index()?;
         let config = index.with_file_name("settings.json");
         if config.exists() {
-            return Ok(serde_json::from_slice(&fs::read(config)?)?);
+            let mut settings: Self = serde_json::from_slice(&fs::read(config)?)?;
+            settings.index = mobboss_core::paths::canonical(&settings.index)?;
+            settings.roots = settings
+                .roots
+                .into_iter()
+                .map(|p| mobboss_core::paths::canonical(&p).unwrap_or(p))
+                .collect();
+            return Ok(settings);
         }
         Ok(Self {
             index,
@@ -46,9 +55,9 @@ pub fn validate_destination(path: &Path, roots: &[PathBuf]) -> Result<()> {
     for root in roots {
         ensure!(root.is_absolute(), "source paths must be absolute");
         // Disconnected shares should not prevent opening the existing library.
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let root = mobboss_core::paths::canonical(root).unwrap_or_else(|_| root.clone());
         ensure!(
-            !dest.starts_with(&root) || root.parent().is_none(),
+            !mobboss_core::paths::contains(&dest, &root) || root.parent().is_none(),
             "destination must be outside scanned sources"
         );
     }
@@ -81,14 +90,14 @@ pub fn scan(
     let roots: Vec<_> = settings
         .roots
         .iter()
-        .map(|p| p.canonicalize())
-        .collect::<std::io::Result<_>>()?;
+        .map(|p| mobboss_core::paths::selected(p))
+        .collect::<Result<_>>()?;
     for (i, root) in roots.iter().enumerate() {
-        if roots
-            .iter()
-            .enumerate()
-            .any(|(j, parent)| i != j && root.starts_with(parent) && (root != parent || j < i))
-        {
+        if roots.iter().enumerate().any(|(j, parent)| {
+            i != j
+                && mobboss_core::paths::contains(root, parent)
+                && (!mobboss_core::paths::same(root, parent) || j < i)
+        }) {
             continue;
         }
         reports.push(index.scan_with(root, options, token, &mut progress)?);
@@ -98,6 +107,7 @@ pub fn scan(
 #[derive(Serialize)]
 pub struct Volume {
     pub name: String,
+    #[serde(serialize_with = "mobboss_core::paths::serialize")]
     pub path: PathBuf,
     pub available: u64,
     pub total: u64,
@@ -121,7 +131,7 @@ pub fn volumes() -> Vec<Volume> {
             name: if cfg!(target_os = "windows") {
                 format!(
                     "{} {}",
-                    d.mount_point().display(),
+                    mobboss_core::paths::display(d.mount_point()).display(),
                     d.name().to_string_lossy()
                 )
             } else if d.mount_point().starts_with("/Volumes") {
@@ -156,9 +166,11 @@ pub fn export(path: &Path, content: &str, roots: &[PathBuf], index: &Path) -> Re
     Ok(())
 }
 pub fn reveal(path: &Path, settings: &Settings) -> Result<()> {
-    let path = path.canonicalize()?;
+    let path = mobboss_core::paths::canonical(path)?;
     ensure!(
-        files(settings)?.iter().any(|f| f.path == path),
+        files(settings)?
+            .iter()
+            .any(|f| mobboss_core::paths::same(&f.path, &path)),
         "select an indexed file"
     );
     #[cfg(target_os = "macos")]

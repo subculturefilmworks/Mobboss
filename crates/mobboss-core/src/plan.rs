@@ -19,6 +19,7 @@ pub enum Operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
     pub file: MediaFile,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub root: PathBuf,
     pub volume: String,
     pub checksum: String,
@@ -31,7 +32,9 @@ pub struct Existing {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub op: Operation,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub source: PathBuf,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub dest: PathBuf,
     pub file: MediaFile,
     pub checksum: String,
@@ -40,6 +43,7 @@ pub struct Action {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveSummary {
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub root: PathBuf,
     pub files: usize,
     pub bytes: u64,
@@ -53,6 +57,7 @@ pub struct Plan {
     pub drives: Vec<DriveSummary>,
     pub warnings: Vec<String>,
     pub conflicts: Vec<String>,
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub log_dirs: Vec<PathBuf>,
     /// Internal collision requests; prepare resolves these before returning a plan.
     #[serde(skip)]
@@ -83,50 +88,9 @@ pub fn sanitize(name: &str) -> String {
 pub fn project_dir(root: &Path, project: &str) -> PathBuf {
     root.join(MEDIA_BY_PROJECT).join(sanitize(project))
 }
-/// Comparison only: keep original paths for checksums, publication and journals.
-/// Reserve names case-insensitively even on the Linux development host so plans
-/// remain portable to default Windows/macOS volumes.
-fn path_key(path: &Path) -> String {
-    path_key_for(&path.to_string_lossy(), cfg!(windows))
-}
-fn path_key_for(path: &str, windows: bool) -> String {
-    let path = if windows {
-        path.replace('\\', "/")
-    } else {
-        path.to_owned()
-    }
-    .to_lowercase();
-    // canonicalize() may supply verbatim drive or UNC paths. Don't canonicalize
-    // here: the planner is pure and its proposed destinations need not exist.
-    let path = if windows {
-        if let Some(unc) = path.strip_prefix("//?/unc/") {
-            format!("//{unc}")
-        } else {
-            path.strip_prefix("//?/").unwrap_or(&path).to_owned()
-        }
-    } else {
-        path
-    };
-    let prefix = if windows && path.starts_with("//") {
-        "//"
-    } else if path.starts_with('/') {
-        "/"
-    } else {
-        ""
-    };
-    let mut key = format!(
-        "{prefix}{}",
-        path.split('/')
-            .filter(|p| !p.is_empty() && *p != ".")
-            .collect::<Vec<_>>()
-            .join("/")
-    );
-    // C: is drive-relative; C:/ is the drive root. Never conflate them.
-    if windows && key.len() == 2 && key.ends_with(':') && path.ends_with('/') {
-        key.push('/');
-    }
-    key
-}
+use crate::paths::key as path_key;
+#[cfg(test)]
+use crate::paths::key_for as path_key_for;
 pub fn build(
     op: Operation,
     project: &str,
@@ -265,8 +229,10 @@ pub fn build(
             let filename = input.file.path.file_name().unwrap_or_default();
             let mut dest = dest_folder.join(filename);
             if key(&source) == key(&dest) {
-                plan.warnings
-                    .push(format!("Already collected: {}", source.display()));
+                plan.warnings.push(format!(
+                    "Already collected: {}",
+                    crate::paths::display(&source).display()
+                ));
                 continue;
             }
             let mut duplicate = false;
@@ -301,13 +267,15 @@ pub fn build(
                 }
             }
             if suffix > 0 {
-                plan.conflicts
-                    .push(format!("Filename conflict; renamed to {}", dest.display()));
+                plan.conflicts.push(format!(
+                    "Filename conflict; renamed to {}",
+                    crate::paths::display(&dest).display()
+                ));
             }
             if duplicate {
                 plan.warnings.push(format!(
                     "Duplicate skipped; source retained: {}",
-                    source.display()
+                    crate::paths::display(&source).display()
                 ));
             }
             if !duplicate {
@@ -352,7 +320,7 @@ pub fn build(
         if available < required {
             plan.warnings.push(format!(
                 "Insufficient free space at {}: need {required}, available {available}",
-                root.display()
+                crate::paths::display(&root).display()
             ));
         }
         plan.drives.push(DriveSummary {

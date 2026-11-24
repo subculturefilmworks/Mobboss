@@ -38,54 +38,31 @@ fn regular(path: &Path) -> Result<fs::Metadata> {
     ensure!(
         meta.file_type().is_file(),
         "not a regular file: {}",
-        path.display()
+        crate::paths::display(path).display()
     );
     Ok(meta)
 }
-/// Reject symlink ancestors, traversal, and deployment-configured protected paths.
+/// Resolve system aliases above the transfer root; reject links inside the tree.
 pub fn safe_path(path: &Path) -> Result<()> {
     ensure!(path.is_absolute(), "absolute paths required");
-    ensure!(
-        !path
-            .components()
-            .any(|c| c == std::path::Component::ParentDir),
-        "parent traversal prohibited"
-    );
+    let canonical = crate::paths::media(path)?;
     if let Some(protected) = std::env::var_os("MOBBOSS_PROTECTED_PATHS") {
         check_protected(
-            path,
+            &canonical,
             std::env::split_paths(&protected).filter(|p| !p.as_os_str().is_empty()),
         )?;
-    }
-    for ancestor in path.ancestors() {
-        if let Ok(m) = fs::symlink_metadata(ancestor) {
-            ensure!(
-                !m.file_type().is_symlink(),
-                "symlink paths prohibited: {}",
-                ancestor.display()
-            );
-        }
     }
     Ok(())
 }
 fn check_protected(path: &Path, roots: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    let path = crate::paths::canonical(path)?;
     for root in roots {
         ensure!(root.is_absolute(), "protected paths must be absolute");
-        let root = root.canonicalize().unwrap_or(root);
-        for ancestor in path.ancestors() {
-            let candidate = ancestor
-                .canonicalize()
-                .unwrap_or_else(|_| ancestor.to_path_buf());
-            #[cfg(windows)]
-            let (candidate, root) = (
-                PathBuf::from(candidate.to_string_lossy().to_lowercase()),
-                PathBuf::from(root.to_string_lossy().to_lowercase()),
-            );
-            ensure!(
-                !candidate.starts_with(&root),
-                "path is protected by MOBBOSS_PROTECTED_PATHS"
-            );
-        }
+        let root = crate::paths::canonical(&root)?;
+        ensure!(
+            !crate::paths::contains(&path, &root),
+            "path is protected by MOBBOSS_PROTECTED_PATHS"
+        );
     }
     Ok(())
 }
@@ -105,7 +82,7 @@ pub fn media_root(file: &MediaFile) -> Result<PathBuf> {
             if root
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|n| n == plan::MEDIA_BY_PROJECT)
+                .is_some_and(|n| n.eq_ignore_ascii_case(plan::MEDIA_BY_PROJECT))
             {
                 return Ok(root
                     .parent()
@@ -118,7 +95,7 @@ pub fn media_root(file: &MediaFile) -> Result<PathBuf> {
     }
     bail!(
         "No Avid MediaFiles ancestor for {}; choose an explicit destination root",
-        file.path.display()
+        crate::paths::display(&file.path).display()
     )
 }
 
@@ -143,22 +120,31 @@ fn prepare_with(
         op != Operation::Collect || destination.is_some(),
         "Move & Backup needs an explicit destination root (--dest)"
     );
+    let destination = destination.map(crate::paths::selected).transpose()?;
+    let destination = destination.as_deref();
     let all = index.files(None)?;
-    let wanted: BTreeSet<_> = paths.iter().collect();
+    let wanted: BTreeSet<_> = paths
+        .iter()
+        .map(|p| crate::paths::canonical(p).map(|p| crate::paths::key(&p)))
+        .collect::<Result<_>>()?;
     ensure!(
-        wanted.iter().all(|p| all.iter().any(|f| &f.path == *p)),
+        wanted
+            .iter()
+            .all(|p| all.iter().any(|f| crate::paths::key(&f.path) == *p)),
         "selection contains an unindexed file"
     );
     let files: Vec<_> = all
         .into_iter()
         .filter(|f| {
-            if destination.is_some_and(|d| f.path.starts_with(plan::project_dir(d, project))) {
+            if destination
+                .is_some_and(|d| crate::paths::contains(&f.path, &plan::project_dir(d, project)))
+            {
                 return false;
             }
             if paths.is_empty() {
                 f.metadata.project.as_deref().unwrap_or("Unknown") == project
             } else {
-                wanted.contains(&f.path)
+                wanted.contains(&crate::paths::key(&f.path))
             }
         })
         .collect();
@@ -169,12 +155,13 @@ fn prepare_with(
         roots.insert(dest.to_path_buf());
     }
     for file in files {
+        crate::paths::within(&file.path, &index.source_root(&file.path)?)?;
         safe_path(&file.path)?;
         let meta = regular(&file.path)?;
         ensure!(
             meta.len() == file.size && stamp(&meta) == file.modified_ns,
             "file changed since scan: {}; rescan",
-            file.path.display()
+            crate::paths::display(&file.path).display()
         );
         let root = match media_root(&file) {
             Ok(root) => root,
@@ -207,6 +194,7 @@ fn prepare_with(
             fs2::available_space(existing_ancestor(&root)?)?,
         );
         let dir = plan::project_dir(&root, project);
+        crate::paths::within(&dir, &root)?;
         if dir.exists() {
             for entry in walkdir::WalkDir::new(&dir).follow_links(false) {
                 let entry = entry?;
@@ -257,7 +245,9 @@ fn prepare_with(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogRow {
     pub op: String,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub source: PathBuf,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub dest: PathBuf,
     pub size: u64,
     pub checksum: String,
@@ -269,15 +259,18 @@ pub struct LogRow {
 pub struct Progress {
     pub done: usize,
     pub total: usize,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub source: PathBuf,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Outcome {
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub logs: Vec<PathBuf>,
     pub completed: usize,
     pub skipped: usize,
     pub cancelled: bool,
     pub warnings: Vec<String>,
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub touched: Vec<PathBuf>,
 }
 struct Journal {
@@ -289,6 +282,10 @@ impl Journal {
         let name = format!("collect-log-{id}.csv");
         let mut dirs: BTreeSet<_> = dirs.iter().cloned().collect();
         dirs.insert(app_data.into());
+        let dirs: BTreeSet<_> = dirs
+            .iter()
+            .map(|p| crate::paths::media(p))
+            .collect::<Result<_>>()?;
         let mut writers = vec![];
         for dir in dirs {
             safe_path(&dir)?;
@@ -304,6 +301,9 @@ impl Journal {
     }
     fn row(&mut self, row: &LogRow) -> Result<()> {
         for (_, w) in &mut self.writers {
+            let mut row = row.clone();
+            row.source = crate::paths::display(&row.source);
+            row.dest = crate::paths::display(&row.dest);
             w.serialize(row)?;
             w.flush()?;
             w.get_ref().sync_all()?;
@@ -548,7 +548,7 @@ fn transfer_with(
     let before = restat(
         &action.file,
         &action.source,
-        action.source == action.file.path,
+        crate::paths::same(&action.source, &action.file.path),
     )?;
     if action.duplicate {
         ensure!(
@@ -668,11 +668,14 @@ pub fn execute(
     let indexed = index.files(None)?;
     for a in &plan.actions {
         ensure!(
-            indexed.iter().any(|f| f.path == a.file.path
-                && f.size == a.file.size
-                && f.modified_ns == a.file.modified_ns),
+            indexed
+                .iter()
+                .any(|f| crate::paths::same(&f.path, &a.file.path)
+                    && f.size == a.file.size
+                    && f.modified_ns == a.file.modified_ns),
             "plan no longer matches the index"
         );
+        crate::paths::within(&a.file.path, &index.source_root(&a.file.path)?)?;
         safe_path(&a.source)?;
         safe_path(&a.dest)?;
     }
@@ -724,7 +727,7 @@ pub fn execute(
         if row.guard.contains("weaker guard") {
             outcome.warnings.push(format!(
                 "{}: used check-then-rename with a weaker overwrite guard",
-                a.dest.display()
+                crate::paths::display(&a.dest).display()
             ));
         }
         match result {
@@ -742,9 +745,10 @@ pub fn execute(
             Err(e) => {
                 failed.insert(a.file.path.clone());
                 outcome.skipped += 1;
-                outcome
-                    .warnings
-                    .push(format!("{}: {e}", a.source.display()));
+                outcome.warnings.push(format!(
+                    "{}: {e}",
+                    crate::paths::display(&a.source).display()
+                ));
                 if row.status == "published" || row.status == "done" {
                     // Preserve recovery information if a failure happens after publication.
                     let verified = if row.checksum.is_empty() {
@@ -778,9 +782,16 @@ pub fn execute(
     Ok(outcome)
 }
 pub fn read_log(path: &Path) -> Result<Vec<LogRow>> {
-    Ok(csv::Reader::from_path(path)?
+    let rows = csv::Reader::from_path(crate::paths::canonical(path)?)?
         .deserialize()
-        .collect::<std::result::Result<Vec<_>, _>>()?)
+        .collect::<std::result::Result<Vec<LogRow>, _>>()?;
+    rows.into_iter()
+        .map(|mut row| {
+            row.source = crate::paths::media(&row.source)?;
+            row.dest = crate::paths::media(&row.dest)?;
+            Ok(row)
+        })
+        .collect()
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct UndoPreview {
@@ -791,7 +802,10 @@ pub struct UndoPreview {
 fn undo_rows(log: &Path) -> Result<Vec<LogRow>> {
     let mut latest = BTreeMap::new();
     for (n, row) in read_log(log)?.into_iter().enumerate() {
-        latest.insert((row.source.clone(), row.dest.clone()), (n, row));
+        latest.insert(
+            (crate::paths::key(&row.source), crate::paths::key(&row.dest)),
+            (n, row),
+        );
     }
     let mut rows: Vec<_> = latest.into_values().collect();
     rows.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
@@ -823,10 +837,13 @@ pub fn preview_undo(index: &Index, log: &Path) -> Result<UndoPreview> {
             row.op == "copy" || row.op == "move",
             "this log is not a reversible transfer log"
         );
-        if !indexed.iter().any(|f| f.path == row.dest) {
+        if !indexed
+            .iter()
+            .any(|f| crate::paths::same(&f.path, &row.dest))
+        {
             warnings.push(format!(
                 "Not currently indexed; will skip unless restored by a preceding undo step: {}",
-                row.dest.display()
+                crate::paths::display(&row.dest).display()
             ));
         }
         if row.op == "move" {
@@ -841,7 +858,7 @@ pub fn preview_undo(index: &Index, log: &Path) -> Result<UndoPreview> {
             if row.source.exists() {
                 warnings.push(format!(
                     "Original path occupied; move-back will be skipped: {}",
-                    row.source.display()
+                    crate::paths::display(&row.source).display()
                 ));
             }
         }
@@ -855,7 +872,7 @@ pub fn preview_undo(index: &Index, log: &Path) -> Result<UndoPreview> {
         if available < required {
             warnings.push(format!(
                 "Insufficient free space for undo at {}",
-                root.display()
+                crate::paths::display(&root).display()
             ));
         }
         drives.push(plan::DriveSummary {
@@ -896,7 +913,7 @@ pub fn undo(
                 if project
                     .parent()
                     .and_then(Path::file_name)
-                    .is_some_and(|n| n == plan::MEDIA_BY_PROJECT)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(plan::MEDIA_BY_PROJECT))
                 {
                     log_dirs.insert(project.to_path_buf());
                 }
@@ -938,7 +955,7 @@ pub fn undo(
             let file = index
                 .files(None)?
                 .into_iter()
-                .find(|f| f.path == row.dest)
+                .find(|f| crate::paths::same(&f.path, &row.dest))
                 .context("undo destination is not indexed")?;
             let before = restat(&file, &row.dest, true)?;
             if row.op == "copy" {
@@ -994,9 +1011,10 @@ pub fn undo(
             Ok(()) => outcome.completed += 1,
             Err(e) => {
                 outcome.skipped += 1;
-                outcome
-                    .warnings
-                    .push(format!("{}: {e}", row.dest.display()));
+                outcome.warnings.push(format!(
+                    "{}: {e}",
+                    crate::paths::display(&row.dest).display()
+                ));
             }
         }
     }
@@ -1160,7 +1178,13 @@ mod tests {
         })
         .unwrap();
         assert!(p.actions[0].duplicate);
-        assert_eq!(reads, vec![file.path, target]);
+        assert_eq!(
+            reads,
+            vec![
+                crate::paths::canonical(&file.path).unwrap(),
+                crate::paths::canonical(&target).unwrap()
+            ]
+        );
     }
     #[test]
     fn unknown_avid_ancestry_requires_destination_for_every_operation() {
@@ -1178,10 +1202,9 @@ mod tests {
                 .to_string();
             assert!(error.contains("explicit destination"), "{error}");
             let p = prepare(&index, op, "Film", &[], Some(&dir.path().join("chosen"))).unwrap();
-            assert!(p
-                .actions
-                .iter()
-                .all(|a| a.dest.starts_with(dir.path().join("chosen"))));
+            assert!(p.actions.iter().all(|a| a
+                .dest
+                .starts_with(crate::paths::canonical(&dir.path().join("chosen")).unwrap())));
         }
     }
     #[test]
