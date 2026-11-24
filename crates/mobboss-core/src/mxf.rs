@@ -302,7 +302,11 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
 pub fn codec_name(ul: &str) -> &'static str {
     if ul.starts_with("060e2b340401") && ul.get(16..24) == Some("04010202") {
         match ul.get(24..28) {
-            Some("7124" | "7125" | "7126" | "7127" | "7128") => "DNxHR",
+            Some("7124") => "DNxHR 444",
+            Some("7125") => "DNxHR HQX",
+            Some("7126") => "DNxHR HQ",
+            Some("7127") => "DNxHR SQ",
+            Some("7128") => "DNxHR LB",
             Some("0307") => "DNxUncompressed",
             Some("0306") => "ProRes",
             Some("0201") => "DV",
@@ -365,7 +369,7 @@ mod tests {
                 assert_eq!(m.codec.as_deref(), Some("PCM"));
                 assert_eq!(m.bit_depth, Some(16));
             } else if m.codec_ul.as_deref() == Some("060e2b340401010d0401020271270000") {
-                assert_eq!(m.codec.as_deref(), Some("DNxHR"));
+                assert_eq!(m.codec.as_deref(), Some("DNxHR SQ"));
                 assert_eq!(m.bit_depth, Some(8));
             } else {
                 assert_eq!(m.codec.as_deref(), Some("DNxUncompressed"));

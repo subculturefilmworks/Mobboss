@@ -127,3 +127,43 @@ fn sample_folder_when_available() {
         deep.elapsed_seconds, quick.elapsed_seconds
     );
 }
+
+#[test]
+fn progressive_cancel_rolls_back_and_parallel_matches() {
+    use mobboss_core::{CancellationToken, ScanOptions, ScanPhase};
+    let t = Temp::new();
+    let media = t.0.join("media");
+    fs::create_dir_all(&media).unwrap();
+    for i in 0..12 {
+        fs::write(media.join(format!("{i}.mxf")), fixture()).unwrap();
+    }
+    let mut index = Index::open_for_scan(&t.0.join("index.sqlite"), &media).unwrap();
+    let token = CancellationToken::default();
+    let result = index.scan_with(&media, &ScanOptions::default(), &token, |p| {
+        if matches!(p.phase, ScanPhase::Enrichment) {
+            token.cancel();
+        }
+    });
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(index.files(None).unwrap().is_empty());
+    let mut serial = Vec::new();
+    for concurrency in [1, 4, 8, 16] {
+        let r = index
+            .scan_with(
+                &media,
+                &ScanOptions {
+                    mode: ScanMode::Deep,
+                    concurrency,
+                },
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!((r.files, r.headers_read), (12, 12));
+        let rows = serde_json::to_string(&index.files(None).unwrap()).unwrap();
+        if serial.is_empty() {
+            serial = rows.as_bytes().to_vec();
+        }
+        assert_eq!(serial, rows.as_bytes());
+    }
+}
