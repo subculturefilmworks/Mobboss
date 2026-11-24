@@ -72,9 +72,9 @@ Copied all **344 original MXFs**, **23,188,799,576 bytes (21.6 GiB)**, into `/tm
 | Planner | Wall time |
 | --- | ---: |
 | Before, hashing every source | 15.6368 s |
-| After, metadata plus collision-only hashing, run 1 | 0.0379 s |
-| After, run 2 | 0.0370 s |
-| After, run 3 | 0.0368 s |
+| After, metadata plus collision-only hashing, run 1 | 0.0409 s |
+| After, run 2 | 0.0408 s |
+| After, run 3 | 0.0409 s |
 
 These are rough **warm-cache** measurements; filesystem caches were not reset. They demonstrate removal of full media reads for an empty destination, not a NAS throughput or cold-cache benchmark. The timing JSON and original output are retained in `/tmp/mobboss-review-benchmark` for inspection.
 

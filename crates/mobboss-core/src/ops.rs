@@ -72,10 +72,20 @@ fn check_protected(path: &Path, roots: impl IntoIterator<Item = PathBuf>) -> Res
     for root in roots {
         ensure!(root.is_absolute(), "protected paths must be absolute");
         let root = root.canonicalize().unwrap_or(root);
-        ensure!(
-            !path.starts_with(&root),
-            "path is protected by MOBBOSS_PROTECTED_PATHS"
-        );
+        for ancestor in path.ancestors() {
+            let candidate = ancestor
+                .canonicalize()
+                .unwrap_or_else(|_| ancestor.to_path_buf());
+            #[cfg(windows)]
+            let (candidate, root) = (
+                PathBuf::from(candidate.to_string_lossy().to_lowercase()),
+                PathBuf::from(root.to_string_lossy().to_lowercase()),
+            );
+            ensure!(
+                !candidate.starts_with(&root),
+                "path is protected by MOBBOSS_PROTECTED_PATHS"
+            );
+        }
     }
     Ok(())
 }
@@ -1086,7 +1096,15 @@ mod tests {
         let root = dir.path().join("protected");
         fs::create_dir(&root).unwrap();
         assert!(check_protected(&root.join("file.mxf"), [root.clone()]).is_err());
-        assert!(check_protected(&dir.path().join("protected-other/file.mxf"), [root]).is_ok());
+        assert!(
+            check_protected(&dir.path().join("protected-other/file.mxf"), [root.clone()]).is_ok()
+        );
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            assert!(check_protected(&alias.join("not-yet-created/file.mxf"), [root]).is_err());
+        }
     }
     fn indexed_fixture(dir: &Path) -> (Index, MediaFile) {
         let path = dir.join("drive/Avid MediaFiles/MXF/1/a.mxf");
