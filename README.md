@@ -102,7 +102,7 @@ npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
 # target/universal-apple-darwin/release/bundle/{macos,dmg}/
 ```
 
-The Windows executable runs directly without installing Mob Boss; it uses the system **Microsoft Edge WebView2 Runtime**, normally present on Windows 10/11. A machine without that runtime needs it provisioned separately. The optional MSI is configured to skip runtime installation. Settings and the index still live in app-data, rather than beside the executable or media.
+The Windows executable runs directly without installing Mob Boss; it uses the system **Microsoft Edge WebView2 Runtime**, normally present on Windows 10/11. A machine without that runtime needs it provisioned separately. On older or locked-down Windows machines where WebView2 is missing or disabled, ask your administrator to provision a supported Microsoft Edge WebView2 Runtime before running Mob Boss. The optional MSI is configured to skip runtime installation. Settings and the index still live in app-data, rather than beside the executable or media.
 
 Mac builds are **unsigned and unnotarized** for now. Open the downloaded `.app` by right-clicking it and choosing **Open**, then confirm **Open**. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway after attempting to open it. The `.app` can run from any writable location; no installer is required. The `.dmg` is a distribution container.
 
