@@ -14,8 +14,10 @@
   --line: #2b3443;
   --text: #dce2ec;
   --muted: #8996aa;
-  --accent: #b1ef7a;
-  --accent-bg: #293a27;
+  --accent: #6aa8ff;
+  --accent-bg: #1c2c47;
+  --accent-border: #2f4a75;
+  --on-accent: #0f1a2c;
   --head: #1b2230;
   --hover: #242e3d;
   color-scheme: dark;
@@ -55,7 +57,7 @@ button:disabled {
 }
 button.primary {
   background: var(--accent);
-  color: #192412;
+  color: var(--on-accent);
   border-color: transparent;
   font-weight: 650;
 }
@@ -97,7 +99,7 @@ header {
   place-items: center;
   color: var(--accent);
   background: var(--accent-bg);
-  border: 1px solid #557b43;
+  border: 1px solid var(--accent-border);
   font-weight: 900;
   border-radius: 12px;
   width: 44px;
@@ -248,7 +250,7 @@ aside {
 }
 .project.active {
   background: var(--accent-bg);
-  border-color: #405639;
+  border-color: var(--accent-border);
   color: var(--accent);
 }
 .summary-exports {
@@ -594,17 +596,15 @@ progress {
   --line: #dce1e8;
   --text: #202b3b;
   --muted: #68778c;
-  --accent: #3c781a;
-  --accent-bg: #edf5e7;
+  --accent: #1f5fd1;
+  --accent-bg: #e8f0fd;
+  --accent-border: #b8cdf3;
+  --on-accent: #ffffff;
   --head: #f5f7f9;
   --hover: #edf1f6;
   color: var(--text);
   background: var(--bg);
   color-scheme: light;
-}
-[data-theme="light"] button.primary {
-  background: #a9e976;
-  color: #18310e;
 }
 @media (max-width: 1100px) {
   aside {
