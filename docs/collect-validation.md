@@ -4,7 +4,7 @@ Branch: `feat/collect`, based on Phase 2 merge `32adfc0`. No push, merge, deploy
 
 ## Automated checks
 
-- `cargo test --offline`: **45 passed** — 22 core unit tests (including 11 planner tests and two executor fault/publication tests), 14 operation integration tests, eight scanner integration tests, one desktop service test. The optional cross-filesystem case returns early without its environment variable; it was also run separately on real distinct filesystems below.
+- `cargo test --offline`: **46 passed** — 23 core unit tests (including 11 planner tests and three executor fault/publication tests), 14 operation integration tests, eight scanner integration tests, one desktop service test. The optional cross-filesystem case returns early without its environment variable; it was also run separately on real distinct filesystems below.
 - `cargo clippy --offline --all-targets -- -D warnings`: clean.
 - `cargo clippy --offline -p mobboss-desktop --features desktop --all-targets -- -D warnings`: clean.
 - `npm test` in `apps/desktop`: **6 Vitest tests passed**.
@@ -50,3 +50,5 @@ The agreed destination layout is used for every operation; no `<Project> - <fold
 Move accepts an optional explicit destination, enabling cross-drive moves; default Move and Collect use source roots. `plan` is a Copy preview; `move`, `copy`, and `collect` each preview their own operation without `--yes`. CLI Undo also requires `--yes`, preserving dry-run-first safety. Cancellation uses Ctrl-C in CLI and the Cancel button in GUI.
 
 Linux native behavior is verified. macOS/Windows builds and native atomic-rename/File Manager behavior still require those platforms. The implementation uses Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, and Windows `MoveFileW` for no-overwrite atomic publication. There is no automatic crash recovery if a process is killed between filesystem publication and SQLite/log completion; retain the journals, rescan and inspect before retrying. Avid must be closed, and editors must expose the collected tree at an appropriate volume/workspace root for Avid to discover it. No media database files are edited.
+
+Review follow-up: `MOBBOSS_CROSS_FS=/dev/shm cargo test --offline -p mobboss-core cross_filesystem -- --nocapture` also exercises an actual cross-device move with corruption injected into the staged destination before verification. The source still exists at that point, the same-size corruption fails the checksum, no final destination is published, the partial is cleaned up, and the journal never advances beyond intent. The insufficient-space integration test separately asserts refusal before destination creation and retention of every source.

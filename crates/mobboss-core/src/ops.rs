@@ -772,9 +772,30 @@ mod tests {
     use super::*;
     #[test]
     fn failed_checksum_never_publishes_or_removes_source() {
+        assert_corrupt_copy_retains_source(None);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cross_filesystem_corrupt_copy_retains_source() {
+        let Some(second) = std::env::var_os("MOBBOSS_CROSS_FS") else {
+            eprintln!("set MOBBOSS_CROSS_FS to exercise cross-filesystem verification failure");
+            return;
+        };
+        assert_corrupt_copy_retains_source(Some(Path::new(&second)));
+    }
+    fn assert_corrupt_copy_retains_source(destination_root: Option<&Path>) {
         let dir = tempfile::tempdir().unwrap();
+        let other = destination_root.map(|p| tempfile::tempdir_in(p).unwrap());
         let source = dir.path().join("source.mxf");
-        let dest = dir.path().join("dest.mxf");
+        let dest = other.as_ref().unwrap_or(&dir).path().join("dest.mxf");
+        #[cfg(unix)]
+        if let Some(other) = &other {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                fs::metadata(dir.path()).unwrap().dev(),
+                fs::metadata(other.path()).unwrap().dev()
+            );
+        }
         fs::write(&source, "original").unwrap();
         let file = MediaFile {
             path: source.clone(),
@@ -801,15 +822,30 @@ mod tests {
             checksum: action.checksum.clone(),
             status: String::new(),
         };
-        assert!(
-            transfer_with(&action, &mut journal, &mut row, true, |partial| {
+        assert!(transfer_with(
+            &action,
+            &mut journal,
+            &mut row,
+            other.is_none(),
+            |partial| {
+                // The source must still exist while the destination awaits verification.
+                assert_eq!(checksum(&source)?, action.checksum);
+                assert_eq!(checksum(partial)?, action.checksum);
+                assert!(!dest.exists());
+                // Same size, different bytes: this must fail the checksum, not just size.
                 fs::write(partial, "bad copy")?;
                 Ok(())
-            })
-            .is_err()
-        );
+            }
+        )
+        .is_err());
         assert_eq!(fs::read_to_string(source).unwrap(), "original");
         assert!(!dest.exists());
+        assert!(!dest.with_file_name("dest.mxf.mobboss-partial").exists());
+        assert_eq!(row.status, "intent");
+        assert!(read_log(&journal.paths()[0])
+            .unwrap()
+            .iter()
+            .all(|r| r.status != "published" && r.status != "done"));
     }
     #[test]
     fn atomic_publication_never_replaces() {
