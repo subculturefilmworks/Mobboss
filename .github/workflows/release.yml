@@ -4,6 +4,9 @@ on:
     tags: ['v*']
 permissions:
   contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   desktop:
     strategy:
@@ -37,14 +40,6 @@ jobs:
         working-directory: apps/desktop
         env:
           RUSTFLAGS: '-C target-feature=+crt-static'
-      - name: Build optional Windows MSI
-        id: msi
-        continue-on-error: true
-        if: runner.os == 'Windows'
-        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles msi
-        working-directory: apps/desktop
-        env:
-          RUSTFLAGS: '-C target-feature=+crt-static'
       - name: Archive app bundle preserving permissions and symlinks
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app' 'target/MobBoss-macOS-universal.app.zip'
@@ -56,15 +51,11 @@ jobs:
             target/MobBoss-macOS-universal.app.zip
             target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: MobBoss-Windows-portable
           path: target/x86_64-pc-windows-msvc/release/MobBoss.exe
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows' && steps.msi.outcome == 'success'
-        with:
-          name: MobBoss-Windows-optional-MSI
-          path: target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-          if-no-files-found: error
+          retention-days: 7

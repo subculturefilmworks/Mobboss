@@ -99,9 +99,12 @@ fn index_symlink_guard() {
 }
 #[test]
 fn sample_folder_when_available() {
-    let root = Path::new(
-        "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1",
-    );
+    // Set MOBBOSS_SAMPLE_DIR to the 344-file sample MXF folder to run this check.
+    let Some(dir) = std::env::var_os("MOBBOSS_SAMPLE_DIR") else {
+        eprintln!("MOBBOSS_SAMPLE_DIR unset; skipping external-data validation");
+        return;
+    };
+    let root = Path::new(&dir);
     if !root.exists() {
         eprintln!("sample folder absent; skipping external-data validation");
         return;

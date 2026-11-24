@@ -159,7 +159,7 @@ The Windows executable runs directly without installing Mob Boss; it uses the sy
 
 Mac builds are **unsigned and unnotarized** for now. Open the downloaded `.app` by right-clicking it and choosing **Open**, then confirm **Open**. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway after attempting to open it. The `.app` can run from any writable location; no installer is required. The `.dmg` is a distribution container.
 
-[The release workflow](.github/workflows/release.yml) builds the universal Mac `.app`/`.dmg`, portable Windows `.exe`, and optional MSI on a `v*` tag push, then uploads workflow artifacts. It does not publish a release. It has not been run or pushed from this machine. Tauri build flags follow the [Tauri 2 CLI reference](https://v2.tauri.app/reference/cli/).
+[The release workflow](.github/workflows/release.yml) builds the universal Mac `.app`/`.dmg` and the portable Windows `.exe` on a `v*` tag push, then uploads them as workflow artifacts (kept 7 days). It does not publish a GitHub Release. The MSI can still be built locally with the command above. Tauri build flags follow the [Tauri 2 CLI reference](https://v2.tauri.app/reference/cli/).
 
 ### Progressive scan API
 
