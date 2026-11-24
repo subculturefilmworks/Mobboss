@@ -44,3 +44,25 @@ Validation on the Linux development host:
 
 Mac and Windows confirmation awaits the native release gate. No push, tag,
 merge or deployment was performed for this fix.
+
+## rc9.2 test corrections
+
+The rc9.1 macOS core and native streaming gates passed. Its shell-wrapper retry
+test incorrectly exercised the Windows libvpx profile against the minimal Mac
+binary. That probe now runs on Linux only; the Windows native gate still proves
+the real software fallback. The Mac build and its VideoToolbox gate are unchanged.
+
+The Windows scanner panic occurred while constructing the legacy fixture,
+before migration: `parent()` on its mixed-separator verbatim path returned
+`None`. The fixture now stores its folder spelling independently. Added Windows
+cases exercise uppercase verbatim paths with native and mixed separators, using
+both canonical long names and actual `GetShortPathNameW` results. On volumes
+without 8.3 aliases, the test logs that fact. Each case checks canonical file and
+folder keys and SQLite clip membership, with and without a material UID.
+Failures report stored file, clip-member and scan-root keys. No production
+migration change was indicated by the original panic.
+
+Local follow-up validation: all 116 workspace tests passed (one ignored process
+helper), with required LGPL codec gates and a symlinked temporary directory;
+all-target/all-feature workspace clippy was clean. The added Windows cases await
+the rc9.2 native runner.

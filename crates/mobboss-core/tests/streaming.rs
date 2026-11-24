@@ -465,7 +465,9 @@ fn copied_long_input_backpressure_and_seek() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+// This shell-wrapper probe exercises the Windows software fallback on Linux.
+// macOS ships only VideoToolbox and deliberately has no libvpx retry profile.
+#[cfg(target_os = "linux")]
 #[test]
 fn failed_hardware_child_exits_before_real_software_retry() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
