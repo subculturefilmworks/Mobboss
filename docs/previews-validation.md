@@ -230,3 +230,60 @@ errors, cancellation and no Mac retry. Native xvfb also received the new respons
 loaded a 5.304-second preview and displayed “Preview: libvpx (VP8) · WebM”.
 The Windows executable and WebView2 have not been run on this Linux machine;
 the updated native Windows gate remains pending the next owner-triggered build.
+
+
+## Browse UX follow-up
+
+Clips headers toggle ascending/descending sort. Clips and Grid share a persisted
+sort choice (name, project, created/modified, duration, size, start TC, tracks).
+Comparisons use natural name ordering, actual rates for duration/timecode, stable
+name/UID ties and unknown values last in both directions. Expanding clips and
+selecting all member files still works after sorting.
+
+`ThumbnailQueue` uses a mutable priority heap for pending jobs: viewport clips,
+then sorted/filtered display order, then filtered-out jobs. IntersectionObserver
+feeds the `prioritize` command, coalesced at 50 ms. Claimed and finished jobs never
+re-enter the heap on scroll/sort/filter changes. Two workers remain active and
+finished JPEGs remain cached. Initial startup submits display order before it
+starts the workers, so it does not start in material-UID order.
+
+Preparation events parse whole ffmpeg progress records (microseconds or timestamp,
+frame count, total output bytes and speed). The last record is drained after child
+exit so completion is not lost. Reading is indeterminate until encoder output;
+Encoding shows measured output time versus clip duration, bytes produced and ETA
+from ffmpeg speed (or elapsed processing rate). Finalizing covers publication;
+Linux separately labels its completed-file Blob load. Source bytes are the total
+selected input sizes, **not an I/O read counter**. Reads and encoding overlap.
+
+Native xvfb with sanitized temporary copies verified header ascending/descending,
+saved sorting after reload, shared Grid size sorting, viewport callbacks on scroll,
+and complete selection of an expanded clip. A copied **39.581-second / 581,090,401-byte**
+DNxHR clip emitted 42 preparation events, from Reading to Finalizing; the proxy
+was 9,087,664 bytes. One measured update showed 22.7 / 39.6 seconds, measured encoded
+bytes and about five seconds remaining. This is local warm-copy development
+behavior, not a cold NAS throughput measurement. Completed playback loaded at
+39.582 seconds and sought to 20 seconds without a media error.
+
+Validation after stacking the Windows cache follow-up: **88 Rust tests**, including
+viewport/display/filtered ordering,
+in-flight preservation, concurrent claims, progress parsing, malformed/N/A values
+and ETA/stage transitions; **15 Vitest tests**, including natural name sorting,
+rate-aware duration/timecode and missing-value ordering. All-target/all-feature
+clippy, frontend build and the Linux Tauri debug build pass. The actual LGPL
+codec smoke also verifies a final progress record and measured output-byte fields.
+The stacked Windows fix covers both fresh and cached WebM fallback, non-fatal
+LRU timestamp updates, bounded partial cleanup and no-replace publication.
+
+### Allowed deviation: progressive start deferred
+
+This card ships part (a) only. The installed Tauri asset handler snapshots the file
+length for Content-Length and Content-Range and responds at the current EOF; it
+is not an append transport. A partially written fMP4 would therefore expose a
+finite, changing range/EOF to native players. Reliably growing playback needs an
+append/session protocol such as MSE and platform validation, already covered by
+the queued streaming card. No incomplete proxy is published and no early-start
+claim is made. Mac/WKWebView and Windows/WebView2 behavior was not exercised here.
+
+Updated sanitized screenshots: [Clips](screenshots/clips.png),
+[Grid](screenshots/grid.png), [preparation](screenshots/preparation.png),
+[player](screenshots/player.png).

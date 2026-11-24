@@ -61,7 +61,6 @@ export function usePreviews(desktop: boolean, files: unknown) {
       const s = await invoke<PreviewStatus>("preview_status");
       if (!disposed) {
         setStatus(s);
-        if (s.available) await invoke("start_thumbnails");
       }
     })().catch((e) => {
       if (!disposed) setStatus((old) => ({ ...old, message: String(e) }));
