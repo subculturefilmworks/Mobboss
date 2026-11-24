@@ -954,6 +954,69 @@ progress {
   background: #202020;
   border-radius: 6px;
 }
+.audio-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.player-media {
+  position: relative;
+}
+.preview-player .audio-stream {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.waveform-player {
+  position: relative;
+  height: min(42vh, 320px);
+  overflow: hidden;
+  border-radius: 6px;
+  background: #202020;
+}
+.waveform-player > img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+.waveform-pending {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--accent);
+}
+.waveform-played {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  opacity: 0.12;
+  pointer-events: none;
+}
+.waveform-playhead {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  border-left: 2px solid var(--accent);
+  pointer-events: none;
+}
+.waveform-caption {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 12px;
+}
 .player-transport {
   display: flex;
   align-items: center;

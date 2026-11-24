@@ -264,7 +264,11 @@ fn retry_partial_cleanup(
 pub fn cache_key(file: &MediaFile) -> String {
     let mut hash = blake3::Hasher::new();
     for part in [
-        "poster-v1",
+        if file.metadata.track_kind.as_deref() == Some("audio") {
+            "waveform-v1"
+        } else {
+            "poster-v1"
+        },
         file.metadata
             .file_package_uid
             .as_deref()
@@ -291,22 +295,48 @@ pub fn seconds(file: &MediaFile) -> f64 {
 fn strings(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
+fn flatten_filter() -> &'static str {
+    "format=rgba,split[fg][bg];[bg]lutrgb=r=32:g=32:b=32:a=255[base];[base][fg]overlay=shortest=1:format=auto,format=yuv420p[v]"
+}
 pub fn composite_filter(width: u32) -> String {
-    format!("[0:v:0]scale={width}:-2,format=rgba,split[fg][bg];[bg]lutrgb=r=32:g=32:b=32:a=255[base];[base][fg]overlay=shortest=1:format=auto,format=yuv420p[v]")
+    format!("[0:v:0]scale={width}:-2,{}", flatten_filter())
+}
+/// Audio-only clips use the first track; video clips always keep their picture poster.
+pub fn poster_source(clip: &Clip) -> Option<&MediaFile> {
+    clip.files
+        .iter()
+        .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
+        .or_else(|| {
+            clip.files
+                .iter()
+                .find(|f| f.metadata.track_kind.as_deref() == Some("audio"))
+        })
 }
 pub fn thumbnail_args(file: &MediaFile, output: &Path) -> Vec<OsString> {
+    let audio = file.metadata.track_kind.as_deref() == Some("audio");
     let seek = if file.metadata.duration == Some(1) {
         0.0
     } else {
         seconds(file) * 0.1
     };
-    let mut args = strings(&["-y", "-threads", "1", "-ss", &format!("{seek:.6}"), "-i"]);
+    let mut args = strings(&["-y", "-threads", "1"]);
+    if audio {
+        // showwavespic reads the whole input before emitting one frame. Bound NAS work.
+        args.extend(strings(&["-t", "60", "-i"]));
+    } else {
+        args.extend(strings(&["-ss", &format!("{seek:.6}"), "-i"]));
+    }
     args.push(file.path.as_os_str().into());
+    let filter = if audio {
+        format!("[0:a:0]aformat=channel_layouts=mono,showwavespic=s=320x180:colors=0x6aa8ff:scale=sqrt:draw=full:filter=peak,{}", flatten_filter())
+    } else {
+        composite_filter(320)
+    };
     args.extend(strings(&[
         "-filter_complex_threads",
         "1",
         "-filter_complex",
-        &composite_filter(320),
+        &filter,
         "-map",
         "[v]",
         "-frames:v",
@@ -510,12 +540,7 @@ impl ThumbnailQueue {
     pub fn new(clips: &[Clip]) -> Self {
         let jobs: Vec<_> = clips
             .iter()
-            .filter_map(|clip| {
-                clip.files
-                    .iter()
-                    .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
-                    .map(|file| (clip.id.clone(), file.clone()))
-            })
+            .filter_map(|clip| poster_source(clip).map(|file| (clip.id.clone(), file.clone())))
             .collect();
         let queue = Self {
             state: Mutex::new(ThumbnailQueueState {
@@ -626,6 +651,32 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+    #[test]
+    fn audio_waveform_jobs_share_priority_queue_and_prefer_video_when_present() {
+        let mut audio = file();
+        audio.path = "/media/audio.mxf".into();
+        audio.metadata.track_kind = Some("audio".into());
+        audio.metadata.material_package_uid = Some("audio-only".into());
+        let mut video = audio.clone();
+        video.path = "/media/video.mxf".into();
+        video.metadata.track_kind = Some("video".into());
+        let clips = crate::clips::group(vec![audio.clone()]);
+        let queue = ThumbnailQueue::new(&clips);
+        assert_eq!(queue.pop().unwrap().1.path, audio.path);
+        assert!(queue.pop().is_none());
+        let mixed = crate::clips::group(vec![audio.clone(), video.clone()]);
+        assert_eq!(poster_source(&mixed[0]).unwrap().path, video.path);
+        assert_ne!(cache_key(&audio), cache_key(&video));
+        let args = thumbnail_args(&audio, Path::new("/cache/waveform.jpg"));
+        let args: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(&args[input - 2..input], ["-t", "60"]);
+        assert!(!args.iter().any(|a| a == "-ss"));
+        let filter = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(filter.contains("[0:a:0]aformat=channel_layouts=mono,showwavespic=s=320x180"));
+        assert!(filter.contains("colors=0x6aa8ff") && filter.contains("lutrgb=r=32:g=32:b=32"));
+        assert_eq!(args.last().unwrap(), "/cache/waveform.jpg");
     }
     #[test]
     fn thumbnail_queue_orders_viewport_display_then_filtered_out() {

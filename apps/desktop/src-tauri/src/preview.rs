@@ -51,11 +51,7 @@ pub fn preview_status(app: tauri::AppHandle, state: State<AppState>) -> Reply<Pr
     let cache = cache(&app).map_err(err)?;
     let mut thumbnails = BTreeMap::new();
     for clip in mobboss_core::clips::group(files) {
-        if let Some(file) = clip
-            .files
-            .iter()
-            .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
-        {
+        if let Some(file) = previews::poster_source(&clip) {
             if let Some(path) = cache
                 .existing(&previews::cache_key(file), "jpg")
                 .map_err(err)?
@@ -153,11 +149,7 @@ pub fn thumbnail_data(
     let cache = cache(&app).map_err(err)?;
     let mut data = BTreeMap::new();
     for clip in clips.into_iter().filter(|c| wanted.contains(&c.id)) {
-        if let Some(file) = clip
-            .files
-            .iter()
-            .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
-        {
+        if let Some(file) = previews::poster_source(&clip) {
             if let Some(path) = cache
                 .existing(&previews::cache_key(file), "jpg")
                 .map_err(err)?

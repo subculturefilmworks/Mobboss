@@ -14,14 +14,16 @@ ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000 -t 1 -c:a pcm_s16le -f m
 ffmpeg -f lavfi -i sine=frequency=880:sample_rate=48000 -t 1 -c:a pcm_s16le -f mxf_opatom audio-right.mxf
 ```
 
-`cargo test -p mobboss-core --test bundled_previews` uses `MOBBOSS_FFMPEG` and the
-production thumbnail/proxy builders. It skips without ffmpeg unless
-`MOBBOSS_REQUIRE_CODEC_SMOKE=1` is set (the release workflow sets it).
-On Mac it requires a JPEG plus H.264/AAC faststart MP4 with two-channel audio
-from both mono duplication and two-track merging. Windows always tests VP8/Opus
-WebM (including full decode and the two-channel Opus header), then tries native
-H.264 through the production fallback path. An unavailable H.264 encoder logs a
-skip to the tested WebM proxy; other errors fail. Linux exercises the Windows
-WebM profile with its development ffmpeg. The Mac gate never substitutes encoders.
-The test joins the independent material
-UIDs in memory to form one clip, without editing these committed inputs.
+`cargo test -p mobboss-core --test bundled_previews --test streaming` uses
+`MOBBOSS_FFMPEG` and the production thumbnail/streaming builders. It skips without
+ffmpeg unless `MOBBOSS_REQUIRE_CODEC_SMOKE=1` is set (the release workflow sets it).
+Both platforms require a video JPEG and an audio-only blue waveform JPEG. The
+stream gate requires its first fragment within eight seconds, a seek to 50% with
+the corresponding absolute `tfdt`, video decoding and two-channel audio decoding.
+It also tests audio-only fragmented MP4 at zero and halfway through the clip.
+Mac strictly requires H.264/AAC. Windows always proves VP9/Opus fragmented MP4,
+then tries Media Foundation H.264 through the production fallback path, logging
+which encoder ran. Other errors fail. Linux uses its development VP9/Opus ffmpeg
+and additionally exercises the small WebM/Blob compatibility transports.
+The tests join independent material UIDs in memory to form one clip, without
+editing these committed inputs. None of the preview streams is written to disk.

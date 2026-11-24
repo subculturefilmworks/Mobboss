@@ -5,7 +5,8 @@ import {
   type StreamStatus,
   type PlaybackMetrics,
 } from "./streaming";
-import { bytes, filename, timecode, type Clip } from "./model";
+import { bytes, filename, timecode, isAudioOnly, type Clip } from "./model";
+import { AudioBadge } from "./Previews";
 export function clipAudioFiles(clip: Clip) {
   const seen = new Set<string>();
   return clip.files
@@ -37,6 +38,7 @@ export default function Player({
     (f) => f.metadata.codec === "DNxUncompressed",
   );
   const audio = clipAudioFiles(clip);
+  const audioOnly = isAudioOnly(clip);
   const [left, setLeft] = useState(0),
     [right, setRight] = useState(audio.length > 1 ? 1 : -1);
   const [attempt, setAttempt] = useState(0),
@@ -49,12 +51,16 @@ export default function Player({
   const [metrics, setMetrics] = useState<PlaybackMetrics | null>(null);
   const picture =
     clip.files.find((f) => f.metadata.track_kind === "video") || clip.files[0];
-  const rate = picture?.metadata.edit_rate;
-  const length =
-    rate && rate.numerator > 0
-      ? (Math.max(0, picture.metadata.duration || 0) * rate.denominator) /
-        rate.numerator
-      : 0;
+  const length = Math.max(
+    0,
+    ...(audioOnly ? audio : [picture]).map((file) => {
+      const rate = file?.metadata.edit_rate;
+      return rate && rate.numerator > 0
+        ? (Math.max(0, file.metadata.duration || 0) * rate.denominator) /
+            rate.numerator
+        : 0;
+    }),
+  );
   const video = useRef<HTMLVideoElement>(null),
     controller = useRef<StreamingPlayer | undefined>(undefined),
     reverse = useRef<number | undefined>(undefined),
@@ -195,24 +201,56 @@ export default function Player({
             Close
           </button>
         </div>
-        <video
-          ref={video}
-          playsInline
-          preload="metadata"
-          poster={poster ? convertFileSrc(poster) : undefined}
-          onTimeUpdate={(e) => {
-            if (!busy || e.currentTarget.readyState >= 2)
-              setPosition(e.currentTarget.currentTime);
-          }}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onError={() => {
-            if (!uncompressedTitle)
-              setError(
-                "The webview could not play this preview. Check the platform media codecs.",
-              );
-          }}
-        />
+        <div className="player-media">
+          <video
+            className={audioOnly ? "audio-stream" : undefined}
+            ref={video}
+            playsInline
+            preload="metadata"
+            poster={poster ? convertFileSrc(poster) : undefined}
+            onTimeUpdate={(e) => {
+              if (!busy || e.currentTarget.readyState >= 2)
+                setPosition(e.currentTarget.currentTime);
+            }}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
+            onError={() => {
+              if (!uncompressedTitle)
+                setError(
+                  "The webview could not play this preview. Check the platform media codecs.",
+                );
+            }}
+          />
+          {audioOnly && (
+            <div
+              className="waveform-player"
+              role="img"
+              aria-label={`Audio waveform for ${clip.name}`}
+            >
+              {poster ? (
+                <img src={convertFileSrc(poster)} alt="" />
+              ) : (
+                <div className="waveform-pending">Audio waveform pending</div>
+              )}
+              <div
+                className="waveform-played"
+                style={{
+                  width: `${Math.max(0, Math.min(100, (position / (length || 1)) * 100))}%`,
+                }}
+              />
+              <div
+                className="waveform-playhead"
+                style={{
+                  left: `${Math.max(0, Math.min(100, (position / (length || 1)) * 100))}%`,
+                }}
+              />
+              <span className="waveform-caption">
+                <AudioBadge /> {clip.tracks}
+                {length > 60 ? " · waveform sampled from first 60 s" : ""}
+              </span>
+            </div>
+          )}
+        </div>
         {uncompressedTitle && (
           <p role="status" className="hint">
             Preview not available for DNxUncompressed (Avid uncompressed title).

@@ -224,6 +224,104 @@ fn fixture_pipe_seek_and_stereo() -> Result<()> {
 }
 
 #[test]
+fn audio_only_stream_seek_and_stereo() -> Result<()> {
+    let Some(ffmpeg) = Ffmpeg::locate(&[]) else {
+        ensure!(
+            std::env::var_os("MOBBOSS_REQUIRE_CODEC_SMOKE").is_none(),
+            "native audio gate requires ffmpeg"
+        );
+        return Ok(());
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/previews");
+    let clip = clips::group(vec![
+        input(&root.join("audio.mxf"))?,
+        input(&root.join("audio-right.mxf"))?,
+    ])
+    .remove(0);
+    let temp = tempfile::tempdir()?;
+    let cache = PreviewCache::open(temp.path())?;
+    let profiles = if cfg!(windows) {
+        vec![Some(Encoder::Vp9), None]
+    } else {
+        vec![None]
+    };
+    for profile in profiles {
+        for start in [0.0, 0.5] {
+            let engine = Streaming::default();
+            let session = engine.start(
+                ffmpeg.clone(),
+                cache.clone(),
+                StartStream {
+                    id: "audio-only-stream".into(),
+                    clip: clip.clone(),
+                    tracks: vec![0, 1],
+                    start,
+                    encoder: profile,
+                },
+            )?;
+            let (init, encoder) = match session.read(None, Duration::from_secs(8)) {
+                ReadResult::Init(init, encoder) => (init, encoder),
+                ReadResult::Failed(error) => anyhow::bail!("{error}"),
+                _ => anyhow::bail!("audio-only stream missing first fragment"),
+            };
+            ensure!(
+                init.mime.starts_with("audio/mp4") && init.tracks.len() == 1,
+                "audio stream must not contain video"
+            );
+            ensure!(
+                init.tracks[0].channels == 2 && encoder.contains("audio only"),
+                "missing stereo/audio-only detail"
+            );
+            let first = match session.read(Some(0), Duration::ZERO) {
+                ReadResult::Media(chunk) => chunk,
+                _ => anyhow::bail!("missing audio fragment"),
+            };
+            ensure!(
+                (first.fragment.start - start).abs() < 0.06,
+                "audio seek timestamp differs"
+            );
+            let mut bytes = init.bytes.clone();
+            bytes.extend_from_slice(&first.fragment.bytes);
+            let decoded = decode(
+                &ffmpeg,
+                &[
+                    "-map",
+                    "0:a:0",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-f",
+                    "s16le",
+                    "pipe:1",
+                ],
+                bytes,
+            )?;
+            ensure!(
+                decoded.status.success()
+                    && decoded.stdout.len() > 1000
+                    && decoded.stdout.len() % 4 == 0,
+                "audio-only stereo decode failed: {}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            ensure!(
+                decoded
+                    .stdout
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|b| b[..2] != b[2..]),
+                "audio-only channels should differ"
+            );
+            engine.stop(Some(&session.id));
+            eprintln!(
+                "{encoder}: audio-only seek {start:.3}s, tfdt {:.6}, stereo decode passed",
+                first.fragment.start
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn copied_long_input_backpressure_and_seek() -> Result<()> {
     let (Some(source), Some(ffmpeg)) = (
         std::env::var_os("MOBBOSS_STREAM_MEDIA"),

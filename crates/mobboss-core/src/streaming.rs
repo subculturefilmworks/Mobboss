@@ -35,7 +35,15 @@ pub enum Encoder {
     LinuxBlob,
 }
 impl Encoder {
-    pub fn description(self) -> &'static str {
+    pub fn description(self, video: bool) -> &'static str {
+        if !video {
+            return match self {
+                Self::Mac | Self::Windows => "AAC · fragmented MP4 (audio only)",
+                Self::Vp9 => "Opus · fragmented MP4 (audio only)",
+                Self::LinuxWebm => "Vorbis · WebM (Linux MSE, audio only)",
+                Self::LinuxBlob => "Opus · WebM (Linux compatibility, audio only)",
+            };
+        }
         match self {
             Self::Mac => "h264_videotoolbox / AAC · fragmented MP4",
             Self::Windows => "h264_mf / AAC · fragmented MP4",
@@ -407,6 +415,7 @@ pub struct Session {
     pub first_sequence: u64,
     pub reused: bool,
     source: (u64, usize),
+    video: bool,
     started: Instant,
     remember_windows: bool,
     shared: Arc<Shared>,
@@ -481,7 +490,7 @@ impl Session {
             output_bytes: state.output_bytes,
             eta_seconds: (speed > 0.0 && !complete && state.end <= self.start)
                 .then(|| (((self.duration - self.start).min(1.0) - seconds) / speed).max(0.0)),
-            encoder: state.encoder.description().into(),
+            encoder: state.encoder.description(self.video).into(),
             buffered_end: state.end,
             memory_bytes: state.memory.bytes(),
             backpressure: !can_read(state.end, playhead),
@@ -519,12 +528,15 @@ impl Session {
                     return ReadResult::Blob(
                         bytes,
                         init.mime.clone(),
-                        state.encoder.description().into(),
+                        state.encoder.description(self.video).into(),
                     );
                 }
             } else if !clip.blob && !clip.chunks.is_empty() {
                 if let Some(init) = &clip.init {
-                    return ReadResult::Init(init.clone(), state.encoder.description().into());
+                    return ReadResult::Init(
+                        init.clone(),
+                        state.encoder.description(self.video).into(),
+                    );
                 }
             }
             if Instant::now() >= deadline {
@@ -875,6 +887,10 @@ impl Streaming {
             first_sequence,
             reused,
             source,
+            video: clip
+                .files
+                .iter()
+                .any(|f| f.metadata.track_kind.as_deref() == Some("video")),
             started: Instant::now(),
             remember_windows: cfg!(windows) && forced.is_none(),
             shared: self.shared.clone(),

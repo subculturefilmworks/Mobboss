@@ -46,7 +46,7 @@ jobs:
           else
             node scripts/fetch-ffmpeg.mjs --target x86_64-pc-windows-msvc
           fi
-      - name: Smoke test posters, first stream fragment, seek timestamps and stereo decode
+      - name: Smoke test posters, waveforms, first fragment, seek timestamps and stereo decode
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then

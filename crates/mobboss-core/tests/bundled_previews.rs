@@ -59,6 +59,13 @@ fn bundled_previews() -> Result<()> {
         jpeg.starts_with(&[0xff, 0xd8]) && jpeg.ends_with(&[0xff, 0xd9]),
         "expected a complete JPEG"
     );
+    let waveform = cache.thumbnail(&ffmpeg, &audio, &cancel)?;
+    let jpeg = fs::read(waveform)?;
+    ensure!(
+        jpeg.starts_with(&[0xff, 0xd8]) && jpeg.ends_with(&[0xff, 0xd9]),
+        "expected a complete audio waveform JPEG"
+    );
+    eprintln!("Native poster gate: video JPEG and bounded audio waveform JPEG passed");
     // Native streaming, stereo decode and seek gates use the same fixture in streaming.rs.
     Ok(())
 }

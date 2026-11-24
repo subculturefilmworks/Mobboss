@@ -101,7 +101,6 @@ function validate(binary, platform) {
     "pcm_s24le",
     "h264",
     "aac",
-    "pcm_s16le",
     ...(platform === "windows" ? ["vp8", "vp9", "opus"] : []),
   ])
     if (!new RegExp(`\\b${name}\\b`).test(decoders))
@@ -137,6 +136,7 @@ function validate(binary, platform) {
         "null",
         "anull",
         "aformat",
+        "showwavespic",
         "anullsrc",
         "buffer",
         "abuffer",
@@ -298,7 +298,7 @@ async function macArch(arch) {
     "--enable-encoder=mjpeg,h264_videotoolbox,aac,pcm_s16le",
     "--enable-videotoolbox",
     "--enable-muxer=image2,mp4,pcm_s16le",
-    "--enable-filter=scale,format,split,lutrgb,overlay,aresample,pan,amerge,apad,atrim,asetpts,setpts,adelay,null,anull,aformat,anullsrc,nullsink,anullsink,trim,buffer,abuffer,buffersink,abuffersink",
+    "--enable-filter=scale,format,split,lutrgb,overlay,aresample,pan,amerge,apad,atrim,asetpts,setpts,adelay,null,anull,aformat,anullsrc,showwavespic,nullsink,anullsink,trim,buffer,abuffer,buffersink,abuffersink",
     "--enable-swscale",
     "--enable-swresample",
   ];

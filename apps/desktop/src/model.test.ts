@@ -3,6 +3,7 @@ import {
   bytes,
   groupedInteger,
   groupClips,
+  isAudioOnly,
   sortClips,
   requiresDestination,
   duration,
@@ -38,6 +39,19 @@ const defaults: Filters = {
   diff: "",
 };
 describe("formatting and exports", () => {
+  it("marks only clips containing audio and no picture as audio-only", () => {
+    const a = file("/media/audio.mxf", "Sample");
+    a.metadata.track_kind = "audio";
+    a.metadata.material_package_uid = "joined";
+    const v = file("/media/video.mxf", "Sample");
+    v.metadata.material_package_uid = "joined";
+    expect(isAudioOnly(groupClips([a])[0])).toBe(true);
+    expect(isAudioOnly(groupClips([v])[0])).toBe(false);
+    expect(isAudioOnly(groupClips([a, v])[0])).toBe(false);
+    const unknown = file("/media/unknown.mxf", "Sample");
+    unknown.metadata.track_kind = null;
+    expect(isAudioOnly(groupClips([unknown])[0])).toBe(false);
+  });
   it("uses platform units and descriptor edit-rate duration, including audio samples", () => {
     expect(bytes(0)).toBe("0 B");
     expect(bytes(1000, "MacIntel")).toBe("1 KB");

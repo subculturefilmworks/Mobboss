@@ -66,7 +66,12 @@ function delay(ms: number, signal: AbortSignal) {
     if (signal.aborted) abort();
   });
 }
-function waitEvent(target: EventTarget, name: string, signal: AbortSignal) {
+function waitEvent(
+  target: EventTarget,
+  name: string,
+  signal: AbortSignal,
+  action?: () => void,
+) {
   return new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
@@ -94,6 +99,14 @@ function waitEvent(target: EventTarget, name: string, signal: AbortSignal) {
     target.addEventListener("error", failed, { once: true });
     signal.addEventListener("abort", aborted, { once: true });
     if (signal.aborted) aborted();
+    else if (action) {
+      try {
+        action();
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    }
   });
 }
 
@@ -220,9 +233,9 @@ export class StreamingPlayer {
     };
     const append = async (data: ArrayBuffer) => {
       if (!current() || !this.buffer) return;
-      const done = waitEvent(this.buffer, "updateend", signal);
-      this.buffer.appendBuffer(data);
-      await done;
+      await waitEvent(this.buffer, "updateend", signal, () =>
+        this.buffer!.appendBuffer(data),
+      );
     };
     try {
       const linux = /linux/i.test(navigator.platform);
@@ -381,9 +394,9 @@ export class StreamingPlayer {
           this.buffer.buffered.length &&
           this.buffer.buffered.start(0) < trim - 0.5
         ) {
-          const done = waitEvent(this.buffer, "updateend", signal);
-          this.buffer.remove(0, trim);
-          await done;
+          await waitEvent(this.buffer, "updateend", signal, () =>
+            this.buffer!.remove(0, trim),
+          );
         }
         retained = retained.filter((c) => c.end >= trim);
         if (complete && source.readyState === "open" && !this.buffer.updating)
