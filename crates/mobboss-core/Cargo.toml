@@ -1,0 +1,12 @@
+[package]
+name = "mobboss-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+directories = "6"
+walkdir = "2"
