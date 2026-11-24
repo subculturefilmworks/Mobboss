@@ -91,6 +91,10 @@ pub fn build(
     existing: &BTreeMap<PathBuf, Existing>,
     space: &BTreeMap<PathBuf, u64>,
 ) -> Result<Plan> {
+    ensure!(
+        op != Operation::Collect || destination.is_some(),
+        "Move & Backup needs an explicit destination root (--dest)"
+    );
     ensure!(!inputs.is_empty(), "no indexed files selected");
     ensure!(
         op != Operation::Copy || destination.is_some(),

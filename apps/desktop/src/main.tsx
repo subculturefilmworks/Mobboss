@@ -451,11 +451,6 @@ function App() {
               HTML ↗
             </button>
           </div>
-          <div className="sidebar-foot">
-            Verified media management
-            <br />
-            Your media stays where it belongs.
-          </div>
         </aside>
         <main>
           <div className="main-title">
@@ -645,7 +640,7 @@ function App() {
                     {r.root}: {r.media_files.toLocaleString()} media files ·{" "}
                     {r.database_files.length} Avid database files (.pmr/.mdb) ·{" "}
                     {r.other_files} other files · {r.folders} folders — total{" "}
-                    {r.total_bytes.toLocaleString()} bytes
+                    {r.total_bytes.toLocaleString("en-US")} bytes
                   </summary>
                   {r.database_files.map((db) => (
                     <p

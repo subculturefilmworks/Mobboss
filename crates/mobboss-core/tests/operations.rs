@@ -340,3 +340,13 @@ fn forged_undo_cannot_write_an_avid_database() {
     assert!(!row.source.exists());
     assert!(row.dest.exists());
 }
+
+#[test]
+fn move_and_backup_requires_destination_before_any_transfer() {
+    let f = Fixture::new();
+    let before = tree(&f.root);
+    let error = ops::prepare(&f.index, Operation::Collect, "Test", &[], None).unwrap_err();
+    assert!(error.to_string().contains("explicit destination"));
+    assert_eq!(tree(&f.root), before);
+    assert_eq!(f.plan(Operation::Move).actions.len(), 3);
+}
