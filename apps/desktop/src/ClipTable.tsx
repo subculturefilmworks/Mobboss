@@ -1,7 +1,10 @@
 import { Poster } from "./Previews";
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  clipSortFields,
+  type ClipSort,
+  type ClipSortKey,
   bytes,
   duration,
   filename,
@@ -12,6 +15,9 @@ import {
 
 export default function ClipTable({
   clips,
+  sort,
+  setSort,
+  onViewportChange,
   selected,
   setSelected,
   thumbnails = {},
@@ -20,6 +26,9 @@ export default function ClipTable({
   onPreview,
 }: {
   clips: Clip[];
+  sort: ClipSort;
+  setSort: (sort: ClipSort) => void;
+  onViewportChange: (ids: string[]) => void;
   thumbnails?: Record<string, string>;
   thumbnailErrors?: Record<string, string>;
   grid?: boolean;
@@ -41,6 +50,85 @@ export default function ClipTable({
     estimateSize: () => 56,
     overscan: 8,
   });
+  const virtualItems = virtual.getVirtualItems();
+  const layout = `${grid}:${virtualItems.map((v) => v.key).join(",")}:${[...expanded].join(",")}`;
+  useEffect(() => {
+    const root = scroll.current;
+    if (!root) return;
+    const nodes = [...root.querySelectorAll<HTMLElement>("[data-clip-id]")];
+    const visible = new Set<Element>();
+    let timer: ReturnType<typeof setTimeout>;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.intersectionRect.height > 0)
+            visible.add(entry.target);
+          else visible.delete(entry.target);
+        });
+        clearTimeout(timer);
+        timer = setTimeout(
+          () =>
+            onViewportChange([
+              ...new Set(
+                nodes
+                  .filter((node) => visible.has(node))
+                  .map((node) => node.dataset.clipId!),
+              ),
+            ]),
+          50,
+        );
+      },
+      { root, threshold: 0 },
+    );
+    nodes.forEach((node) => observer.observe(node));
+    return () => {
+      observer.disconnect();
+      clearTimeout(timer);
+    };
+  }, [clips, layout, onViewportChange]);
+  const sortingControls = (
+    <div className="clip-sort-controls">
+      <label>
+        Sort by{" "}
+        <select
+          aria-label="Sort clips by"
+          value={sort.key}
+          onChange={(e) =>
+            setSort({ key: e.target.value as ClipSortKey, desc: sort.desc })
+          }
+        >
+          {clipSortFields.map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        aria-label={sort.desc ? "Sort ascending" : "Sort descending"}
+        onClick={() => setSort({ ...sort, desc: !sort.desc })}
+      >
+        {sort.desc ? "Descending ↓" : "Ascending ↑"}
+      </button>
+    </div>
+  );
+  const header = (key: ClipSortKey, label: string) => (
+    <span
+      role="columnheader"
+      aria-sort={
+        sort.key === key ? (sort.desc ? "descending" : "ascending") : "none"
+      }
+    >
+      <button
+        onClick={() =>
+          setSort({ key, desc: sort.key === key ? !sort.desc : false })
+        }
+      >
+        {label}
+        {sort.key === key ? (sort.desc ? " ↓" : " ↑") : ""}
+      </button>
+    </span>
+  );
   const all =
     clips.length > 0 &&
     clips.every((c) => c.files.every((f) => selected.has(f.path)));
@@ -48,13 +136,15 @@ export default function ClipTable({
     return (
       <section className="table-section">
         <div className="table-tools">
-          {clips.length.toLocaleString()} matching clips
+          <span>{clips.length.toLocaleString()} matching clips</span>
+          {sortingControls}
         </div>
-        <div className="clip-grid">
+        <div ref={scroll} className="clip-grid">
           {clips.map((clip) => (
             <article
               tabIndex={0}
               key={clip.id}
+              data-clip-id={clip.id}
               className={`clip-card ${clip.files.every((f) => selected.has(f.path)) ? "selected" : ""}`}
               onClick={(e) => {
                 setSelected(selectClip(selected, clip, e.ctrlKey || e.metaKey));
@@ -116,6 +206,7 @@ export default function ClipTable({
           {clips.length.toLocaleString()} matching clips · actions include every
           member file
         </span>
+        {sortingControls}
       </div>
       <div
         ref={scroll}
@@ -139,12 +230,12 @@ export default function ClipTable({
             }}
           />
           <span>Thumbnail</span>
-          <span>Clip / files</span>
-          <span>Project</span>
-          <span>Tracks</span>
-          <span>Duration</span>
-          <span>Start TC</span>
-          <span>Size</span>
+          {header("name", "Clip / files")}
+          {header("project", "Project")}
+          {header("tracks", "Tracks")}
+          {header("duration", "Duration")}
+          {header("timecode", "Start TC")}
+          {header("size", "Size")}
         </div>
         <div
           style={{
@@ -153,7 +244,7 @@ export default function ClipTable({
             minWidth: 950,
           }}
         >
-          {virtual.getVirtualItems().map((item) => {
+          {virtualItems.map((item) => {
             const { clip, file } = entries[item.index],
               checked = file
                 ? selected.has(file.path)
@@ -162,6 +253,7 @@ export default function ClipTable({
               <div
                 key={file ? `${clip.id}:${file.path}` : clip.id}
                 role="row"
+                data-clip-id={clip.id}
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (
@@ -223,22 +315,28 @@ export default function ClipTable({
                     <Fragment>↳ {filename(file.path)}</Fragment>
                   ) : (
                     <>
-                      <button
-                        aria-label={`Expand ${clip.name}`}
-                        aria-expanded={expanded.has(clip.id)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const next = new Set(expanded);
-                          next.has(clip.id)
-                            ? next.delete(clip.id)
-                            : next.add(clip.id);
-                          setExpanded(next);
-                        }}
-                      >
-                        {expanded.has(clip.id) ? "▾" : "▸"}
-                      </button>
+                      {clip.files.length > 1 && (
+                        <button
+                          className="clip-files-pill"
+                          aria-label={`Show ${clip.files.length} files in this clip`}
+                          aria-expanded={expanded.has(clip.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const next = new Set(expanded);
+                            next.has(clip.id)
+                              ? next.delete(clip.id)
+                              : next.add(clip.id);
+                            setExpanded(next);
+                          }}
+                        >
+                          {clip.files.length} files
+                          <span
+                            className="clip-files-chevron"
+                            aria-hidden="true"
+                          />
+                        </button>
+                      )}
                       {clip.name}
-                      <small>{clip.files.length} files</small>
                     </>
                   )}
                 </span>

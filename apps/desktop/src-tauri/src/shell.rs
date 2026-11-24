@@ -7,7 +7,7 @@ pub(crate) struct AppState {
     pub(crate) active: Mutex<Option<CancellationToken>>,
     pub(crate) preview_clearing: std::sync::atomic::AtomicBool,
     pub(crate) proxy: Mutex<crate::preview::ProxyState>,
-    pub(crate) thumbnails: Mutex<Option<CancellationToken>>,
+    pub(crate) thumbnails: Mutex<crate::preview::ThumbnailState>,
     planned: Mutex<Option<mobboss_core::plan::Plan>>,
     undo_log: Mutex<Option<PathBuf>>,
 }
@@ -268,7 +268,7 @@ pub fn run() {
                 active: Mutex::new(None),
                 preview_clearing: std::sync::atomic::AtomicBool::new(false),
                 proxy: Mutex::new(crate::preview::ProxyState::default()),
-                thumbnails: Mutex::new(None),
+                thumbnails: Mutex::new(crate::preview::ThumbnailState::default()),
                 planned: Mutex::new(None),
                 undo_log: Mutex::new(None),
             });
@@ -282,6 +282,7 @@ pub fn run() {
             crate::preview::cancel_proxy,
             crate::preview::clear_preview_cache,
             crate::preview::start_thumbnails,
+            crate::preview::prioritize,
             crate::preview::cancel_thumbnails,
             settings,
             save_settings,

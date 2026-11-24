@@ -1,7 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { filename, timecode, type Clip } from "./model";
+import { bytes, filename, timecode, type Clip } from "./model";
+interface PreparationProgress {
+  request_id: string;
+  phase: "reading" | "encoding" | "finalizing" | "loading";
+  fraction: number;
+  seconds: number;
+  duration: number;
+  input_bytes: number;
+  input_files: number;
+  output_bytes?: number | null;
+  eta_seconds?: number | null;
+  speed?: number | null;
+}
 export function clipAudioFiles(clip: Clip) {
   const seen = new Set<string>();
   return clip.files
@@ -43,6 +55,9 @@ export default function Player({
     [position, setPosition] = useState(0),
     [length, setLength] = useState(0),
     [playing, setPlaying] = useState(false);
+  const [preparation, setPreparation] = useState<PreparationProgress | null>(
+    null,
+  );
   const [source, setSource] = useState("");
   const [encoder, setEncoder] = useState("");
   const video = useRef<HTMLVideoElement>(null),
@@ -84,6 +99,7 @@ export default function Player({
     setEncoder("");
     setError("");
     setFraction(0);
+    setPreparation(null);
     setPosition(0);
     setLength(0);
     if (uncompressedTitle) {
@@ -91,10 +107,13 @@ export default function Player({
       return;
     }
     (async () => {
-      unlisten = await listen<{ request_id: string; fraction: number }>(
+      unlisten = await listen<PreparationProgress>(
         "proxy-progress",
         ({ payload: p }) => {
-          if (!disposed && p.request_id === requestId) setFraction(p.fraction);
+          if (!disposed && p.request_id === requestId) {
+            setFraction(p.fraction);
+            setPreparation(p);
+          }
         },
       );
       if (disposed) {
@@ -110,11 +129,14 @@ export default function Player({
         },
       );
       const path = preview.path;
+      setFraction(1);
       let source = convertFileSrc(path);
       // WebKitGTK delegates media fetching to GStreamer, which cannot read Tauri's
       // custom URI scheme. Fetch from the scoped asset protocol into a browser Blob;
       // native Blob seeking works. macOS/Windows stream the range-capable asset URL.
       if (/linux/i.test(navigator.platform)) {
+        if (!disposed)
+          setPreparation((old) => (old ? { ...old, phase: "loading" } : old));
         const response = await fetch(source);
         if (!response.ok)
           throw new Error(`Could not load cached preview (${response.status})`);
@@ -323,8 +345,44 @@ export default function Player({
         )}
         {busy && (
           <div className="proxy-progress" role="status">
-            <progress max={1} value={fraction} />
-            <span>Preparing preview · {Math.round(fraction * 100)}%</span>
+            <progress
+              max={1}
+              value={
+                !preparation || preparation.phase === "reading"
+                  ? undefined
+                  : fraction
+              }
+            />
+            <div>
+              <strong>
+                {!preparation || preparation.phase === "reading"
+                  ? "Reading input headers…"
+                  : preparation.phase === "loading"
+                    ? "Loading cached preview…"
+                    : preparation.phase === "finalizing"
+                      ? "Finalizing preview…"
+                      : `Encoding · ${Math.round(fraction * 100)}%`}
+              </strong>
+              {preparation && (
+                <small>
+                  {preparation.input_files} input
+                  {preparation.input_files === 1 ? "" : "s"} ·{" "}
+                  {bytes(preparation.input_bytes)} source total
+                </small>
+              )}
+              {preparation?.phase === "encoding" && (
+                <small>
+                  {preparation.seconds.toFixed(1)} /{" "}
+                  {preparation.duration.toFixed(1)} s
+                  {preparation.eta_seconds != null
+                    ? ` · ETA ~${Math.ceil(preparation.eta_seconds)} s`
+                    : " · estimating ETA…"}
+                  {preparation.output_bytes != null
+                    ? ` · ${bytes(preparation.output_bytes)} encoded`
+                    : ""}
+                </small>
+              )}
+            </div>
             <button
               onClick={() =>
                 invoke("cancel_proxy", { requestId: job.current }).catch((e) =>

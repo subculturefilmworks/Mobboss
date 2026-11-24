@@ -3,6 +3,8 @@ use crate::{clips::Clip, CancellationToken, MediaFile};
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use std::{
+    cmp::Reverse,
+    collections::{BTreeSet, BinaryHeap, HashMap},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader},
@@ -15,6 +17,117 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct FfmpegProgress {
+    pub seconds: f64,
+    pub output_bytes: Option<u64>,
+    pub speed: Option<f64>,
+    pub frames: Option<u64>,
+    pub finished: bool,
+}
+#[derive(Default)]
+pub struct ProgressParser {
+    current: FfmpegProgress,
+}
+impl ProgressParser {
+    /// FFmpeg's out_time_ms, despite its name, is also expressed in microseconds.
+    pub fn line(&mut self, line: &str) -> Option<FfmpegProgress> {
+        let (key, value) = line.trim().split_once('=')?;
+        let value = value.trim();
+        let number = |text: &str| text.parse::<f64>().ok().filter(|n| n.is_finite());
+        match key {
+            "out_time_us" | "out_time_ms" => {
+                if let Some(n) = number(value) {
+                    self.current.seconds = (n / 1_000_000.0).max(0.0);
+                }
+            }
+            "out_time" => {
+                let parts: Vec<_> = value.split(':').collect();
+                if parts.len() == 3 {
+                    if let (Some(h), Some(m), Some(s)) =
+                        (number(parts[0]), number(parts[1]), number(parts[2]))
+                    {
+                        if h >= 0.0 && (0.0..60.0).contains(&m) && (0.0..60.0).contains(&s) {
+                            let total = h * 3600.0 + m * 60.0 + s;
+                            if total.is_finite() {
+                                self.current.seconds = total;
+                            }
+                        }
+                    }
+                }
+            }
+            "total_size" => self.current.output_bytes = value.parse().ok(),
+            "speed" => {
+                self.current.speed = number(value.trim_end_matches('x')).filter(|s| *s > 0.0)
+            }
+            "frame" => self.current.frames = value.trim().parse().ok(),
+            "progress" if value == "continue" || value == "end" => {
+                self.current.finished = value == "end";
+                return Some(std::mem::take(&mut self.current));
+            }
+            _ => {}
+        }
+        None
+    }
+}
+#[derive(Clone, Serialize)]
+pub struct PreparationProgress {
+    pub phase: &'static str,
+    pub fraction: f64,
+    pub seconds: f64,
+    pub duration: f64,
+    pub input_bytes: u64,
+    pub input_files: usize,
+    pub output_bytes: Option<u64>,
+    pub eta_seconds: Option<f64>,
+    pub speed: Option<f64>,
+}
+pub fn preparation_progress(
+    update: FfmpegProgress,
+    duration: f64,
+    source: (u64, usize),
+    elapsed: Duration,
+) -> PreparationProgress {
+    let duration = if duration.is_finite() {
+        duration.max(0.0)
+    } else {
+        0.0
+    };
+    let seconds = update.seconds.max(0.0).min(duration);
+    let speed = update
+        .speed
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .or_else(|| {
+            (elapsed.as_secs_f64() > 0.0 && seconds > 0.0).then(|| seconds / elapsed.as_secs_f64())
+        });
+    PreparationProgress {
+        phase: if update.finished {
+            "finalizing"
+        } else if seconds > 0.0 || update.frames.is_some_and(|n| n > 0) {
+            "encoding"
+        } else {
+            "reading"
+        },
+        fraction: if update.finished {
+            1.0
+        } else if duration > 0.0 {
+            seconds / duration
+        } else {
+            0.0
+        },
+        seconds,
+        duration,
+        input_bytes: source.0,
+        input_files: source.1,
+        output_bytes: update.output_bytes,
+        eta_seconds: if update.finished {
+            None
+        } else {
+            speed.map(|speed| (duration - seconds) / speed)
+        },
+        speed,
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Ffmpeg {
     pub binary: PathBuf,
@@ -37,7 +150,7 @@ impl Ffmpeg {
         &self,
         args: &[OsString],
         cancel: &CancellationToken,
-        mut progress: impl FnMut(f64),
+        mut progress: impl FnMut(FfmpegProgress),
     ) -> Result<()> {
         ensure!(!cancel.is_cancelled(), "Preview cancelled");
         let mut command = Command::new(&self.binary);
@@ -50,6 +163,8 @@ impl Ffmpeg {
                 "-progress",
                 "pipe:1",
                 "-nostats",
+                "-stats_period",
+                "0.25",
             ])
             .args(args)
             .stdin(Stdio::null())
@@ -67,15 +182,13 @@ impl Ffmpeg {
         let stderr = child.stderr.take().context("ffmpeg stderr")?;
         let (sender, receiver) = std::sync::mpsc::channel();
         let output = std::thread::spawn(move || {
+            let mut parser = ProgressParser::default();
             for line in BufReader::new(stdout)
                 .lines()
                 .map_while(std::result::Result::ok)
             {
-                if let Some(value) = line
-                    .strip_prefix("out_time_us=")
-                    .and_then(|s| s.parse::<f64>().ok())
-                {
-                    let _ = sender.send(value / 1_000_000.0);
+                if let Some(update) = parser.line(&line) {
+                    let _ = sender.send(update);
                 }
             }
         });
@@ -114,6 +227,9 @@ impl Ffmpeg {
         // Release the process handle before callers clean up or publish its output.
         drop(child);
         let _ = output.join();
+        for update in receiver.try_iter() {
+            progress(update);
+        }
         let stderr = errors.join().unwrap_or_default();
         ensure!(!cancel.is_cancelled(), "Preview cancelled");
         ensure!(status?.success(), "Preview failed: {stderr}");
@@ -381,37 +497,83 @@ pub struct ThumbnailProgress {
     pub error: Option<String>,
     pub cancelled: bool,
 }
+/// Rebuild priorities for pending jobs only; claimed/finished jobs never re-enter.
+pub struct ThumbnailQueue {
+    jobs: Vec<(String, MediaFile)>,
+    state: Mutex<ThumbnailQueueState>,
+}
+struct ThumbnailQueueState {
+    pending: BTreeSet<usize>,
+    heap: BinaryHeap<Reverse<(u8, usize, usize)>>,
+}
+impl ThumbnailQueue {
+    pub fn new(clips: &[Clip]) -> Self {
+        let jobs: Vec<_> = clips
+            .iter()
+            .filter_map(|clip| {
+                clip.files
+                    .iter()
+                    .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
+                    .map(|file| (clip.id.clone(), file.clone()))
+            })
+            .collect();
+        let queue = Self {
+            state: Mutex::new(ThumbnailQueueState {
+                pending: (0..jobs.len()).collect(),
+                heap: BinaryHeap::new(),
+            }),
+            jobs,
+        };
+        queue.prioritize(&[], &[]);
+        queue
+    }
+    pub fn prioritize(&self, visible: &[String], display: &[String]) {
+        let display: HashMap<_, _> = display
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| (id, rank))
+            .collect();
+        let visible: BTreeSet<_> = visible.iter().collect();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.heap = state
+            .pending
+            .iter()
+            .map(|&index| {
+                let id = &self.jobs[index].0;
+                let priority = match display.get(id) {
+                    Some(&rank) if visible.contains(id) => (0, rank, index),
+                    Some(&rank) => (1, rank, index),
+                    None => (2, index, index),
+                };
+                Reverse(priority)
+            })
+            .collect();
+    }
+    fn pop(&self) -> Option<(String, MediaFile)> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Reverse((_, _, index)) = state.heap.pop()?;
+        state.pending.remove(&index);
+        Some(self.jobs[index].clone())
+    }
+}
 pub fn thumbnails(
     cache: &PreviewCache,
     ffmpeg: &Ffmpeg,
-    clips: &[Clip],
+    queue: &ThumbnailQueue,
     cancel: &CancellationToken,
     progress: impl Fn(ThumbnailProgress) + Sync,
 ) {
-    let jobs: Vec<_> = clips
-        .iter()
-        .filter_map(|c| {
-            c.files
-                .iter()
-                .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
-                .map(|f| (c.id.clone(), f))
-        })
-        .collect();
-    let next = AtomicUsize::new(0);
     let completed = Mutex::new(0usize);
     std::thread::scope(|scope| {
         for _ in 0..2 {
-            let jobs = &jobs;
-            let next = &next;
             let completed = &completed;
             let progress = &progress;
             scope.spawn(move || {
                 while !cancel.is_cancelled() {
-                    let Some((clip_id, file)) = jobs.get(next.fetch_add(1, Ordering::Relaxed))
-                    else {
+                    let Some((clip_id, file)) = queue.pop() else {
                         break;
                     };
-                    let result = cache.thumbnail(ffmpeg, file, cancel);
+                    let result = cache.thumbnail(ffmpeg, &file, cancel);
                     let mut done = completed.lock().unwrap_or_else(|e| e.into_inner());
                     *done += 1;
                     let (path, error) = match result {
@@ -420,8 +582,8 @@ pub fn thumbnails(
                     };
                     progress(ThumbnailProgress {
                         done: *done,
-                        total: jobs.len(),
-                        clip_id: clip_id.clone(),
+                        total: queue.jobs.len(),
+                        clip_id,
                         path,
                         error,
                         cancelled: cancel.is_cancelled(),
@@ -431,6 +593,7 @@ pub fn thumbnails(
         }
     });
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +613,171 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+    fn queued_clips() -> Vec<Clip> {
+        crate::clips::group(
+            (0..6)
+                .map(|i| {
+                    let mut f = file();
+                    f.metadata.track_kind = Some("video".into());
+                    f.metadata.material_package_uid = Some(i.to_string());
+                    f.path = format!("/media/{i}.mxf").into();
+                    f
+                })
+                .collect(),
+        )
+    }
+    #[test]
+    fn thumbnail_queue_orders_viewport_display_then_filtered_out() {
+        let queue = ThumbnailQueue::new(&queued_clips());
+        let ids = |items: &[u8]| items.iter().map(|i| format!("uid:{i}")).collect::<Vec<_>>();
+        queue.prioritize(&ids(&[0, 4, 1]), &ids(&[3, 1, 4]));
+        let mut order = Vec::new();
+        while let Some((id, _)) = queue.pop() {
+            order.push(id);
+        }
+        // Stale viewport ID 0 is filtered out and cannot jump the display order.
+        assert_eq!(order, ids(&[1, 4, 3, 0, 2, 5]));
+    }
+    #[test]
+    fn thumbnail_reprioritization_preserves_claimed_jobs_without_duplicates() {
+        let queue = ThumbnailQueue::new(&queued_clips());
+        assert_eq!(queue.pop().unwrap().0, "uid:0");
+        assert_eq!(queue.pop().unwrap().0, "uid:1");
+        queue.prioritize(
+            &["uid:5".into(), "uid:0".into()],
+            &["uid:5".into(), "uid:0".into(), "uid:3".into()],
+        );
+        assert_eq!(queue.pop().unwrap().0, "uid:5");
+        queue.prioritize(
+            &["uid:4".into()],
+            &["uid:4".into(), "uid:3".into(), "uid:2".into()],
+        );
+        let mut order = Vec::new();
+        while let Some((id, _)) = queue.pop() {
+            order.push(id);
+        }
+        assert_eq!(order, ["uid:4", "uid:3", "uid:2"]);
+        queue.prioritize(&[], &["uid:0".into()]);
+        assert!(queue.pop().is_none());
+    }
+    #[test]
+    fn concurrent_thumbnail_claims_remain_unique_during_reprioritization() {
+        let queue = ThumbnailQueue::new(&queued_clips());
+        let claimed = Mutex::new(Vec::new());
+        let started = std::sync::Barrier::new(3);
+        let resume = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let queue = &queue;
+                let claimed = &claimed;
+                let started = &started;
+                let resume = &resume;
+                scope.spawn(move || {
+                    claimed.lock().unwrap().push(queue.pop().unwrap().0);
+                    started.wait();
+                    resume.wait();
+                    while let Some((id, _)) = queue.pop() {
+                        claimed.lock().unwrap().push(id);
+                    }
+                });
+            }
+            started.wait();
+            for _ in 0..20 {
+                queue.prioritize(&["uid:4".into()], &["uid:4".into(), "uid:2".into()]);
+            }
+            resume.wait();
+        });
+        let claimed = claimed.into_inner().unwrap();
+        assert_eq!(claimed.len(), 6);
+        assert_eq!(claimed.into_iter().collect::<BTreeSet<_>>().len(), 6);
+    }
+    #[test]
+    fn progress_parser_reads_complete_records_and_microseconds() {
+        let mut parser = ProgressParser::default();
+        for line in [
+            "frame= 42",
+            "out_time_us=1500000",
+            "out_time_ms=1500000",
+            "total_size= 8192",
+            "speed= 2.5x",
+        ] {
+            assert!(parser.line(line).is_none());
+        }
+        let p = parser.line("progress=continue").unwrap();
+        assert_eq!(p.seconds, 1.5);
+        assert_eq!(p.frames, Some(42));
+        assert_eq!(p.output_bytes, Some(8192));
+        assert_eq!(p.speed, Some(2.5));
+        assert!(!p.finished);
+        parser.line("out_time=01:02:03.125");
+        let p = parser.line("progress=end\r").unwrap();
+        assert_eq!(p.seconds, 3723.125);
+        assert!(p.finished);
+        assert!(p.speed.is_none());
+        assert!(p.output_bytes.is_none());
+    }
+    #[test]
+    fn progress_rejects_na_malformed_and_nonfinite_values() {
+        let mut parser = ProgressParser::default();
+        for line in [
+            "out_time_us=-1",
+            "out_time=oops",
+            "out_time=00:99:00",
+            "out_time_us=NaN",
+            "speed=N/A",
+            "total_size=N/A",
+            "frame=invalid",
+            "out_time=1e308:00:00",
+            "ignored",
+        ] {
+            parser.line(line);
+        }
+        let p = parser.line("progress=end").unwrap();
+        assert_eq!(p.seconds, 0.0);
+        assert!(p.speed.is_none());
+        assert!(p.output_bytes.is_none());
+    }
+    #[test]
+    fn preparation_phases_and_eta_use_measured_output_time() {
+        let initial =
+            preparation_progress(FfmpegProgress::default(), 60.0, (1000, 3), Duration::ZERO);
+        assert_eq!(initial.phase, "reading");
+        assert!(initial.eta_seconds.is_none());
+        let update = FfmpegProgress {
+            seconds: 10.0,
+            speed: Some(2.0),
+            output_bytes: Some(100),
+            ..Default::default()
+        };
+        let encoding = preparation_progress(update, 60.0, (1000, 3), Duration::from_secs(8));
+        assert_eq!(encoding.phase, "encoding");
+        assert_eq!(encoding.eta_seconds, Some(25.0));
+        assert_eq!(encoding.input_bytes, 1000);
+        assert_eq!(encoding.input_files, 3);
+        assert_eq!(encoding.output_bytes, Some(100));
+        let measured = preparation_progress(
+            FfmpegProgress {
+                speed: None,
+                ..update
+            },
+            60.0,
+            (1000, 3),
+            Duration::from_secs(5),
+        );
+        assert_eq!(measured.eta_seconds, Some(25.0));
+        let done = preparation_progress(
+            FfmpegProgress {
+                finished: true,
+                ..update
+            },
+            60.0,
+            (1000, 3),
+            Duration::from_secs(5),
+        );
+        assert_eq!(done.phase, "finalizing");
+        assert_eq!(done.fraction, 1.0);
+        assert!(done.eta_seconds.is_none());
     }
     #[test]
     fn cache_keys_invalidate_and_copies_share() {
@@ -580,6 +908,15 @@ fn proxy_inputs<'a>(
         "No playable video or audio in clip"
     );
     Ok((video, selected))
+}
+pub fn proxy_source_summary(clip: &Clip, tracks: &[usize]) -> Result<(u64, usize)> {
+    let (video, audio) = proxy_inputs(clip, tracks)?;
+    Ok(video
+        .into_iter()
+        .chain(audio)
+        .fold((0u64, 0), |(bytes, count), file| {
+            (bytes.saturating_add(file.size), count + 1)
+        }))
 }
 pub fn proxy_key(clip: &Clip, tracks: &[usize], platform: ProxyPlatform) -> Result<String> {
     let (video, audio) = proxy_inputs(clip, tracks)?;
@@ -827,7 +1164,7 @@ impl PreviewCache {
         tracks: &[usize],
         platform: ProxyPlatform,
         cancel: &CancellationToken,
-        mut progress: impl FnMut(f64),
+        mut progress: impl FnMut(FfmpegProgress),
     ) -> Result<ProxyOutput> {
         let video = clip
             .files
@@ -846,7 +1183,7 @@ impl PreviewCache {
         tracks: &[usize],
         platform: ProxyPlatform,
         cancel: &CancellationToken,
-        progress: impl FnMut(f64),
+        progress: impl FnMut(FfmpegProgress),
     ) -> Result<PathBuf> {
         let (video, audio) = proxy_inputs(clip, tracks)?;
         for file in video.into_iter().chain(audio.iter().copied()) {
@@ -1016,6 +1353,7 @@ mod proxy_tests {
     #[test]
     fn hardware_platforms_channels_and_proxy_keys() {
         let clip = grouped();
+        assert_eq!(proxy_source_summary(&clip, &[0, 1]).unwrap(), (30, 3));
         let out = Path::new("/cache/proxy.mp4");
         for (platform, encoder) in [
             (ProxyPlatform::Mac, "h264_videotoolbox"),

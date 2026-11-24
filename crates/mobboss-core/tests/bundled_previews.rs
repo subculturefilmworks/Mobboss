@@ -102,8 +102,21 @@ fn bundled_previews() -> Result<()> {
     };
     for profile in profiles {
         for tracks in [&[0][..], &[0, 1][..]] {
+            let mut updates = Vec::new();
             let preview =
-                cache.proxy_with_fallback(&ffmpeg, &clip, tracks, profile, &cancel, |_| {})?;
+                cache.proxy_with_fallback(&ffmpeg, &clip, tracks, profile, &cancel, |update| {
+                    updates.push(update)
+                })?;
+            if profile != ProxyPlatform::Windows {
+                ensure!(
+                    updates.last().is_some_and(|p| p.finished),
+                    "missing final ffmpeg progress record"
+                );
+                ensure!(
+                    updates.iter().any(|p| p.output_bytes.is_some()),
+                    "missing measured encoded bytes"
+                );
+            }
             if profile != ProxyPlatform::Windows {
                 ensure!(
                     preview

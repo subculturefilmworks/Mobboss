@@ -13,6 +13,8 @@ import MediaTable, { useStored } from "./MediaTable";
 import {
   bytes,
   groupedInteger,
+  sortClips,
+  type ClipSort,
   filename,
   diffRows,
   filter,
@@ -57,6 +59,20 @@ function App() {
   });
   const [volumes, setVolumes] = useState<Volume[]>([]);
   const [view, setView] = useStored("mobboss.view", "files");
+  const [clipSort, setClipSort] = useStored<ClipSort>("mobboss.clip-sort", {
+    key: "name",
+    desc: false,
+  });
+  const [visibleClips, setVisibleClips] = useState<string[]>([]);
+  const viewportChanged = useCallback(
+    (ids: string[]) =>
+      setVisibleClips((old) =>
+        old.length === ids.length && old.every((id, i) => id === ids[i])
+          ? old
+          : ids,
+      ),
+    [],
+  );
   const [mode, setMode] = useStored("mobboss.mode", "quick");
   const [theme, setTheme] = useStored("mobboss.theme", "dark");
   const [filters, setFilters] = useState<Filters>(emptyFilters);
@@ -171,10 +187,41 @@ function App() {
   );
   const clips = useMemo(() => {
     const matching = new Set(filtered.map((r) => r.file.path));
-    return groupClips(rows.map((r) => r.file)).filter((c) =>
-      c.files.some((f) => matching.has(f.path)),
+    return sortClips(
+      groupClips(rows.map((r) => r.file)).filter((c) =>
+        c.files.some((f) => matching.has(f.path)),
+      ),
+      clipSort,
     );
-  }, [rows, filtered]);
+  }, [rows, filtered, clipSort]);
+  useEffect(() => {
+    if (desktop)
+      invoke("prioritize", {
+        visible: view === "files" ? [] : visibleClips,
+        display: clips.map((c) => c.id),
+      }).catch((e) => setNotice(String(e)));
+  }, [clips, visibleClips, view]);
+  const initialThumbnails = useRef(false);
+  useEffect(() => {
+    if (
+      !desktop ||
+      !ready ||
+      busy ||
+      !previews.status.available ||
+      initialThumbnails.current
+    )
+      return;
+    initialThumbnails.current = true;
+    invoke("prioritize", {
+      visible: view === "files" ? [] : visibleClips,
+      display: clips.map((c) => c.id),
+    })
+      .then(() => invoke("start_thumbnails"))
+      .catch((e) => {
+        initialThumbnails.current = false;
+        setNotice(String(e));
+      });
+  }, [ready, busy, previews.status.available, clips, visibleClips, view]);
   const summary = useMemo(() => projects(files), [files]);
   const selectedRows = useMemo(
     () => rows.filter((r) => selected.has(r.file.path)),
@@ -616,6 +663,9 @@ function App() {
           </div>
           {view !== "files" ? (
             <ClipTable
+              sort={clipSort}
+              setSort={setClipSort}
+              onViewportChange={viewportChanged}
               thumbnailErrors={previews.errors}
               onPreview={setPlayer}
               thumbnails={previews.status.thumbnails}

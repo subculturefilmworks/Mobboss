@@ -7,7 +7,7 @@ use mobboss_core::{
     CancellationToken,
 };
 use serde::Serialize;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tauri::{Emitter, Manager, State};
 
 pub fn cache(app: &tauri::AppHandle) -> anyhow::Result<PreviewCache> {
@@ -76,9 +76,26 @@ pub fn preview_status(app: tauri::AppHandle, state: State<AppState>) -> Reply<Pr
         cache_bytes: cache.size().map_err(err)?,
     })
 }
+#[derive(Default)]
+pub(crate) struct ThumbnailState {
+    active: Option<CancellationToken>,
+    queue: Option<Arc<previews::ThumbnailQueue>>,
+    visible: Vec<String>,
+    display: Vec<String>,
+}
+#[tauri::command]
+pub fn prioritize(visible: Vec<String>, display: Vec<String>, state: State<AppState>) -> Reply<()> {
+    let mut thumbnails = state.thumbnails.lock().map_err(err)?;
+    if let Some(queue) = &thumbnails.queue {
+        queue.prioritize(&visible, &display);
+    }
+    thumbnails.visible = visible;
+    thumbnails.display = display;
+    Ok(())
+}
 #[tauri::command]
 pub fn cancel_thumbnails(state: State<AppState>) -> Reply<()> {
-    if let Some(token) = state.thumbnails.lock().map_err(err)?.as_ref() {
+    if let Some(token) = state.thumbnails.lock().map_err(err)?.active.as_ref() {
         token.cancel();
     }
     Ok(())
@@ -97,7 +114,7 @@ pub fn start_thumbnails(app: tauri::AppHandle, state: State<AppState>) -> Reply<
         return Err("Wait for the current scan or operation".into());
     }
     let mut active = state.thumbnails.lock().map_err(err)?;
-    if active.is_some() {
+    if active.active.is_some() {
         return Ok(());
     }
     let ffmpeg = ffmpeg(&app).ok_or("Previews unavailable · ffmpeg is missing")?;
@@ -106,9 +123,12 @@ pub fn start_thumbnails(app: tauri::AppHandle, state: State<AppState>) -> Reply<
     let clips = mobboss_core::clips::group(service::files(&settings).map_err(err)?);
     service::validate_destination(&cache.root.join("cache-check"), &settings.roots).map_err(err)?;
     let token = CancellationToken::default();
-    *active = Some(token.clone());
+    let queue = Arc::new(previews::ThumbnailQueue::new(&clips));
+    queue.prioritize(&active.visible, &active.display);
+    active.active = Some(token.clone());
+    active.queue = Some(queue.clone());
     std::thread::spawn(move || {
-        previews::thumbnails(&cache, &ffmpeg, &clips, &token, |p| {
+        previews::thumbnails(&cache, &ffmpeg, &queue, &token, |p| {
             let _ = app.emit("thumbnail-progress", p);
         });
         let protected = app
@@ -121,7 +141,8 @@ pub fn start_thumbnails(app: tauri::AppHandle, state: State<AppState>) -> Reply<
             .collect::<Vec<_>>();
         let _ = cache.prune(settings.preview_cache_bytes, &protected);
         if let Ok(mut active) = app.state::<AppState>().thumbnails.lock() {
-            *active = None;
+            active.active = None;
+            active.queue = None;
         }
         let _ = app.emit("thumbnails-finished", token.is_cancelled());
     });
@@ -177,7 +198,8 @@ pub(crate) struct ProxyState {
 #[derive(Clone, Serialize)]
 struct ProxyProgress {
     request_id: String,
-    fraction: f64,
+    #[serde(flatten)]
+    status: previews::PreparationProgress,
 }
 #[tauri::command]
 pub fn cancel_proxy(request_id: Option<String>, state: State<AppState>) -> Reply<()> {
@@ -206,7 +228,7 @@ pub async fn prepare_proxy(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let token = CancellationToken::default();
-        let (settings, clip, ffmpeg, cache) = {
+        let (settings, clip, ffmpeg, cache, source) = {
             let operation = state.active.lock().map_err(err)?;
             if state
                 .preview_clearing
@@ -226,13 +248,14 @@ pub async fn prepare_proxy(
             let cache = cache(&app).map_err(err)?;
             service::validate_destination(&cache.root.join("cache-check"), &settings.roots)
                 .map_err(err)?;
+            let source = previews::proxy_source_summary(&clip, &tracks).map_err(err)?;
             cancel_thumbnails(state.clone())?;
             let mut proxy = state.proxy.lock().map_err(err)?;
             if let Some((_, old)) = proxy.active.take() {
                 old.cancel();
             }
             proxy.active = Some((request_id.clone(), token.clone()));
-            (settings, clip, ffmpeg, cache)
+            (settings, clip, ffmpeg, cache, source)
         };
         let duration = clip
             .files
@@ -242,6 +265,22 @@ pub async fn prepare_proxy(
             .map(previews::seconds)
             .unwrap_or(1.0)
             .max(0.001);
+        let started = std::time::Instant::now();
+        let publish = |update| {
+            let _ = app.emit(
+                "proxy-progress",
+                ProxyProgress {
+                    request_id: request_id.clone(),
+                    status: previews::preparation_progress(
+                        update,
+                        duration,
+                        source,
+                        started.elapsed(),
+                    ),
+                },
+            );
+        };
+        publish(previews::FfmpegProgress::default());
         let result = cache
             .proxy_with_fallback(
                 &ffmpeg,
@@ -249,15 +288,7 @@ pub async fn prepare_proxy(
                 &tracks,
                 previews::ProxyPlatform::current(),
                 &token,
-                |seconds| {
-                    let _ = app.emit(
-                        "proxy-progress",
-                        ProxyProgress {
-                            request_id: request_id.clone(),
-                            fraction: (seconds / duration).clamp(0.0, 1.0),
-                        },
-                    );
-                },
+                publish,
             )
             .and_then(|output| {
                 if std::fs::metadata(&output.path)?.len() > settings.preview_cache_bytes {
@@ -311,7 +342,7 @@ pub async fn clear_preview_cache(app: tauri::AppHandle) -> Reply<()> {
         cancel_thumbnails(state.clone())?;
         cancel_proxy(None, state.clone())?;
         for _ in 0..100 {
-            let idle = state.thumbnails.lock().map_err(err)?.is_none()
+            let idle = state.thumbnails.lock().map_err(err)?.active.is_none()
                 && state.proxy.lock().map_err(err)?.active.is_none();
             if idle {
                 state.proxy.lock().map_err(err)?.playing = None;

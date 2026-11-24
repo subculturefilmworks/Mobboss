@@ -356,6 +356,83 @@ export interface Clip {
   size: number;
   tracks: string;
 }
+export const clipSortFields = [
+  ["name", "Name"],
+  ["project", "Project"],
+  ["created", "Created"],
+  ["modified", "Modified"],
+  ["duration", "Duration"],
+  ["size", "Size"],
+  ["timecode", "Start TC"],
+  ["tracks", "Tracks"],
+] as const;
+export type ClipSortKey = (typeof clipSortFields)[number][0];
+export interface ClipSort {
+  key: ClipSortKey;
+  desc: boolean;
+}
+export function sortClips(clips: Clip[], sort: ClipSort): Clip[] {
+  const key = clipSortFields.some(([key]) => key === sort?.key)
+    ? sort.key
+    : "name";
+  const value = (clip: Clip): string | number | undefined => {
+    const m = clip.metadata;
+    const rate = (r?: Rational | null) =>
+      r && r.numerator > 0 && r.denominator > 0
+        ? r.numerator / r.denominator
+        : undefined;
+    switch (key) {
+      case "name":
+        return clip.name;
+      case "project":
+        return m.project || undefined;
+      case "tracks":
+        return clip.tracks || undefined;
+      case "size":
+        return clip.size;
+      case "created":
+        return m.created ? Date.parse(m.created) : undefined;
+      case "modified":
+        return m.modified
+          ? Date.parse(m.modified)
+          : Math.max(...clip.files.map((f) => Number(f.modified_ns) / 1e6));
+      case "duration": {
+        const fps = rate(m.edit_rate);
+        return m.duration != null && fps ? m.duration / fps : undefined;
+      }
+      case "timecode": {
+        const fps =
+          rate(m.timecode_rate) || m.timecode_fps || rate(m.edit_rate);
+        return m.start_timecode != null && fps
+          ? m.start_timecode / fps
+          : undefined;
+      }
+    }
+  };
+  const missing = (v: unknown) =>
+    v == null || (typeof v === "number" && !Number.isFinite(v));
+  return [...clips].sort((a, b) => {
+    const x = value(a),
+      y = value(b);
+    if (missing(x) !== missing(y)) return missing(x) ? 1 : -1;
+    const result = missing(x)
+      ? 0
+      : typeof x === "number" && typeof y === "number"
+        ? x - y
+        : String(x).localeCompare(String(y), undefined, {
+            numeric: true,
+            sensitivity: "base",
+          });
+    return (
+      (sort?.desc ? -result : result) ||
+      a.name.localeCompare(b.name, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }) ||
+      a.id.localeCompare(b.id)
+    );
+  });
+}
 export function groupClips(files: MediaFile[]): Clip[] {
   const groups = new Map<string, MediaFile[]>();
   for (const file of files) {

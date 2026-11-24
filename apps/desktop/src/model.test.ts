@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   bytes,
   groupedInteger,
+  groupClips,
+  sortClips,
   requiresDestination,
   duration,
   filter,
@@ -227,5 +229,76 @@ describe("reconciliation number grouping", () => {
     } finally {
       parts.mockRestore();
     }
+  });
+});
+
+describe("clip sorting", () => {
+  it("sorts names naturally in both directions without changing members", () => {
+    const files = [file("/media/2", "A"), file("/media/10", "B")];
+    files[0].metadata.clip_name = "Clip 2";
+    files[1].metadata.clip_name = "Clip 10";
+    const clips = groupClips(files);
+    expect(
+      sortClips(clips, { key: "name", desc: false }).map((c) => c.name),
+    ).toEqual(["Clip 2", "Clip 10"]);
+    expect(
+      sortClips(clips, { key: "name", desc: true }).map((c) => c.name),
+    ).toEqual(["Clip 10", "Clip 2"]);
+    expect(clips[0].files).toEqual([files[0]]);
+  });
+  it("compares duration and start TC by their actual rates, keeping unknowns last", () => {
+    const files = [
+      file("/media/a", "A"),
+      file("/media/b", "B"),
+      file("/media/c", "C"),
+    ];
+    Object.assign(files[0].metadata, {
+      duration: 50,
+      edit_rate: { numerator: 25, denominator: 1 },
+      start_timecode: 50,
+      timecode_fps: 25,
+    });
+    Object.assign(files[1].metadata, {
+      duration: 60,
+      edit_rate: { numerator: 60, denominator: 1 },
+      start_timecode: 60,
+      timecode_fps: 60,
+    });
+    const clips = groupClips(files);
+    for (const key of ["duration", "timecode"] as const) {
+      expect(sortClips(clips, { key, desc: false }).map((c) => c.id)).toEqual([
+        "file:/media/b",
+        "file:/media/a",
+        "file:/media/c",
+      ]);
+      expect(sortClips(clips, { key, desc: true }).map((c) => c.id)).toEqual([
+        "file:/media/a",
+        "file:/media/b",
+        "file:/media/c",
+      ]);
+    }
+  });
+  it("sorts project, size and dates and breaks ties deterministically", () => {
+    const files = [file("/media/b", "B", 20), file("/media/a", "A", 10)];
+    Object.assign(files[0].metadata, {
+      created: "2025-01-01",
+      modified: "2026-01-01",
+    });
+    Object.assign(files[1].metadata, {
+      created: "2024-01-01",
+      modified: "2025-01-01",
+    });
+    const clips = groupClips(files);
+    for (const key of [
+      "project",
+      "size",
+      "created",
+      "modified",
+      "name",
+    ] as const)
+      expect(sortClips(clips, { key, desc: false }).map((c) => c.id)).toEqual([
+        "file:/media/a",
+        "file:/media/b",
+      ]);
   });
 });
