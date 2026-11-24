@@ -170,7 +170,7 @@ fn undo_refuses_modified_copy() {
     assert!(p.actions[0].dest.exists());
 }
 #[test]
-fn unindexed_selection_and_sample_are_rejected() {
+fn unindexed_selection_is_rejected() {
     let f = Fixture::new();
     assert!(ops::prepare(
         &f.index,
@@ -180,7 +180,6 @@ fn unindexed_selection_and_sample_are_rejected() {
         None
     )
     .is_err());
-    assert!(ops::safe_path(Path::new("<sample-folder>/new")).is_err());
 }
 #[test]
 fn stale_partial_is_never_overwritten() {
@@ -244,11 +243,16 @@ fn cross_filesystem_move_verifies_before_delete_and_undo_restores() {
     );
     let before = tree(&f.root);
     let p = ops::prepare(&f.index, Operation::Move, "Test", &[], Some(other.path())).unwrap();
+    let expected: std::collections::BTreeMap<_, _> = p
+        .actions
+        .iter()
+        .map(|a| (a.dest.clone(), ops::checksum(&a.source).unwrap()))
+        .collect();
     let out = f.execute(&p);
     assert_eq!(out.completed, 3, "{:?}", out.warnings);
     for a in &p.actions {
         assert!(!a.source.exists());
-        assert_eq!(ops::checksum(&a.dest).unwrap(), a.checksum);
+        assert_eq!(ops::checksum(&a.dest).unwrap(), expected[&a.dest]);
     }
     // A durable published (verified) entry precedes done (source removed) for every cross-device move.
     let log = out.logs.iter().find(|p| p.starts_with(&f.data)).unwrap();

@@ -54,6 +54,9 @@ pub struct Plan {
     pub warnings: Vec<String>,
     pub conflicts: Vec<String>,
     pub log_dirs: Vec<PathBuf>,
+    /// Internal collision requests; prepare resolves these before returning a plan.
+    #[serde(skip)]
+    pub checksum_requests: Vec<(PathBuf, PathBuf)>,
 }
 pub fn sanitize(name: &str) -> String {
     let s: String = name
@@ -99,6 +102,7 @@ pub fn build(
         drives: vec![],
         conflicts: vec![],
         log_dirs: vec![],
+        checksum_requests: vec![],
         warnings: vec![
             "Quit Media Composer before moving media".into(),
             "Avid will rebuild its media databases on next launch".into(),
@@ -186,8 +190,21 @@ pub fn build(
                     format!("{folder}.{n}")
                 });
                 let candidate = p.join(input.file.path.file_name().unwrap_or_default());
+                if candidate != source {
+                    if let Some((actual, e)) = occupied.get(&key(&candidate)) {
+                        if existing.contains_key(actual)
+                            && e.size == input.file.size
+                            && (e.checksum.is_empty() || input.checksum.is_empty())
+                        {
+                            plan.checksum_requests
+                                .push((input.file.path.clone(), actual.clone()));
+                        }
+                    }
+                }
                 let same = occupied.get(&key(&candidate)).is_some_and(|(_, e)| {
-                    e.size == input.file.size && e.checksum == input.checksum
+                    !input.checksum.is_empty()
+                        && e.size == input.file.size
+                        && e.checksum == input.checksum
                 });
                 if counts.get(&key(&p)).copied().unwrap_or(0) < FOLDER_LIMIT
                     || same
@@ -210,7 +227,17 @@ pub fn build(
                 // Case insensitive reservation also prevents clashes on Mac/Windows.
                 let found = occupied.get(&key(&dest));
                 if let Some((actual_path, e)) = found {
-                    if e.size == input.file.size && e.checksum == input.checksum {
+                    if existing.contains_key(actual_path)
+                        && e.size == input.file.size
+                        && (e.checksum.is_empty() || input.checksum.is_empty())
+                    {
+                        plan.checksum_requests
+                            .push((input.file.path.clone(), actual_path.clone()));
+                    }
+                    if !input.checksum.is_empty()
+                        && e.size == input.file.size
+                        && e.checksum == input.checksum
+                    {
                         dest = actual_path.clone();
                         duplicate = true;
                         break;
@@ -227,7 +254,7 @@ pub fn build(
             }
             if suffix > 0 {
                 plan.conflicts
-                    .push(format!("Different content; renamed to {}", dest.display()));
+                    .push(format!("Filename conflict; renamed to {}", dest.display()));
             }
             if duplicate {
                 plan.warnings.push(format!(
@@ -262,7 +289,7 @@ pub fn build(
                 duplicate,
                 step,
             });
-            // Duplicate moves retain their source, but the optional copy can use the verified existing destination.
+            // Duplicate moves retain their indexed source for the optional copy.
             if !duplicate {
                 source = dest;
             }

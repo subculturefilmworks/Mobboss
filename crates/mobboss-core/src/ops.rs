@@ -42,7 +42,7 @@ fn regular(path: &Path) -> Result<fs::Metadata> {
     );
     Ok(meta)
 }
-/// Reject symlink ancestors, traversal, and the protected sample before any mutation.
+/// Reject symlink ancestors, traversal, and deployment-configured protected paths.
 pub fn safe_path(path: &Path) -> Result<()> {
     ensure!(path.is_absolute(), "absolute paths required");
     ensure!(
@@ -51,10 +51,12 @@ pub fn safe_path(path: &Path) -> Result<()> {
             .any(|c| c == std::path::Component::ParentDir),
         "parent traversal prohibited"
     );
-    ensure!(
-        !path.starts_with("<sample-folder>"),
-        "the sample is read-only"
-    );
+    if let Some(protected) = std::env::var_os("MOBBOSS_PROTECTED_PATHS") {
+        check_protected(
+            path,
+            std::env::split_paths(&protected).filter(|p| !p.as_os_str().is_empty()),
+        )?;
+    }
     for ancestor in path.ancestors() {
         if let Ok(m) = fs::symlink_metadata(ancestor) {
             ensure!(
@@ -63,6 +65,17 @@ pub fn safe_path(path: &Path) -> Result<()> {
                 ancestor.display()
             );
         }
+    }
+    Ok(())
+}
+fn check_protected(path: &Path, roots: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    for root in roots {
+        ensure!(root.is_absolute(), "protected paths must be absolute");
+        let root = root.canonicalize().unwrap_or(root);
+        ensure!(
+            !path.starts_with(&root),
+            "path is protected by MOBBOSS_PROTECTED_PATHS"
+        );
     }
     Ok(())
 }
@@ -93,41 +106,28 @@ pub fn media_root(file: &MediaFile) -> Result<PathBuf> {
             return Ok(root.into());
         }
     }
-    // Arbitrary indexed MXF folders use the mounted filesystem root. An explicit
-    // destination is preferable when that volume root is not writable.
-    let mut root = file
-        .path
-        .parent()
-        .context("no source folder")?
-        .to_path_buf();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let device = fs::metadata(&root)?.dev();
-        while let Some(parent) = root.parent() {
-            if fs::metadata(parent)?.dev() != device {
-                break;
-            }
-            root = parent.into();
-        }
-    }
-    #[cfg(windows)]
-    {
-        root = file
-            .path
-            .ancestors()
-            .last()
-            .context("no volume root")?
-            .to_path_buf();
-    }
-    Ok(root)
+    bail!(
+        "No Avid MediaFiles ancestor for {}; choose an explicit destination root",
+        file.path.display()
+    )
 }
+
 pub fn prepare(
     index: &Index,
     op: Operation,
     project: &str,
     paths: &[PathBuf],
     destination: Option<&Path>,
+) -> Result<Plan> {
+    prepare_with(index, op, project, paths, destination, checksum)
+}
+fn prepare_with(
+    index: &Index,
+    op: Operation,
+    project: &str,
+    paths: &[PathBuf],
+    destination: Option<&Path>,
+    mut hash_file: impl FnMut(&Path) -> Result<String>,
 ) -> Result<Plan> {
     let all = index.files(None)?;
     let wanted: BTreeSet<_> = paths.iter().collect();
@@ -162,14 +162,21 @@ pub fn prepare(
             "file changed since scan: {}; rescan",
             file.path.display()
         );
-        let root = media_root(&file)?;
+        let root = match media_root(&file) {
+            Ok(root) => root,
+            Err(error) => {
+                let dest = destination.with_context(|| error.to_string())?;
+                // Explicit Collect for an arbitrary folder collects directly into this root.
+                dest.to_path_buf()
+            }
+        };
         roots.insert(root.clone());
         let volume = root
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let hash = checksum(&file.path)?;
+        let hash = String::new();
         inputs.push(Input {
             file,
             root,
@@ -203,14 +210,35 @@ pub fn prepare(
                         entry.path().into(),
                         Existing {
                             size: entry.metadata()?.len(),
-                            checksum: checksum(entry.path())?,
+                            checksum: String::new(),
                         },
                     );
                 }
             }
         }
     }
-    plan::build(op, project, &inputs, destination, &existing, &space)
+    loop {
+        let preview = plan::build(op, project, &inputs, destination, &existing, &space)?;
+        if preview.checksum_requests.is_empty() {
+            return Ok(preview);
+        }
+        for (source, dest) in &preview.checksum_requests {
+            let input = inputs
+                .iter_mut()
+                .find(|i| i.file.path == *source)
+                .context("unknown checksum source")?;
+            if input.checksum.is_empty() {
+                input.checksum = hash_file(source)?;
+                restat(&input.file, source, true)?;
+            }
+            let entry = existing
+                .get_mut(dest)
+                .context("unknown checksum destination")?;
+            if entry.checksum.is_empty() {
+                entry.checksum = hash_file(dest)?;
+            }
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogRow {
@@ -220,6 +248,8 @@ pub struct LogRow {
     pub size: u64,
     pub checksum: String,
     pub status: String,
+    #[serde(default)]
+    pub guard: String,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
@@ -270,17 +300,19 @@ impl Journal {
         self.writers.iter().map(|(p, _)| p.clone()).collect()
     }
 }
-fn unchanged(file: &MediaFile, source: &Path, hash: &str, check_stamp: bool) -> Result<()> {
+fn restat(file: &MediaFile, source: &Path, check_stamp: bool) -> Result<fs::Metadata> {
     let meta = regular(source)?;
     ensure!(
         meta.len() == file.size && (!check_stamp || stamp(&meta) == file.modified_ns),
         "size/mtime changed since scan"
     );
-    ensure!(checksum(source)? == hash, "source checksum changed");
-    let after = regular(source)?;
+    Ok(meta)
+}
+fn same_stat(before: &fs::Metadata, path: &Path) -> Result<()> {
+    let after = regular(path)?;
     ensure!(
-        after.len() == meta.len() && stamp(&after) == stamp(&meta),
-        "source changed during checksum"
+        before.len() == after.len() && stamp(before) == stamp(&after),
+        "source size/mtime changed during transfer"
     );
     Ok(())
 }
@@ -335,6 +367,147 @@ fn publish(source: &Path, dest: &Path) -> std::io::Result<()> {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameMethod {
+    Atomic,
+    HardLink,
+    Weak,
+}
+impl RenameMethod {
+    fn guard(self) -> &'static str {
+        match self {
+            Self::Atomic => "atomic-noreplace",
+            Self::HardLink => "hard-link-no-replace",
+            Self::Weak => "check-then-rename (weaker guard)",
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum RenameResult {
+    Renamed,
+    Linked,
+    CopyRequired,
+}
+fn cross_device(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::EXDEV)
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(17)
+    } // ERROR_NOT_SAME_DEVICE
+}
+fn unsupported_rename(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        [libc::EINVAL, libc::ENOTSUP, libc::EOPNOTSUPP, libc::ENOSYS]
+            .iter()
+            .any(|code| error.raw_os_error() == Some(*code))
+    }
+    #[cfg(windows)]
+    {
+        [1, 50, 87]
+            .iter()
+            .any(|code| error.raw_os_error() == Some(*code))
+    }
+}
+fn different_devices(source: &Path, destination_parent: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(regular(source)?.dev() != fs::metadata(destination_parent)?.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (source, destination_parent);
+        Ok(false)
+    }
+}
+/// Injectable decision tree: errors other than EXDEV/device differences never trigger a copy.
+fn rename_with(
+    different: bool,
+    mut attempt: impl FnMut(RenameMethod) -> std::io::Result<()>,
+) -> std::io::Result<RenameResult> {
+    match attempt(RenameMethod::Atomic) {
+        Ok(()) => return Ok(RenameResult::Renamed),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(e) if cross_device(&e) || different => return Ok(RenameResult::CopyRequired),
+        Err(e) if unsupported_rename(&e) => {}
+        Err(e) => return Err(e),
+    }
+    match attempt(RenameMethod::HardLink) {
+        Ok(()) => return Ok(RenameResult::Linked),
+        Err(e) if cross_device(&e) => return Ok(RenameResult::CopyRequired),
+        // Some SMB shares report EPERM for unsupported hard links.
+        Err(e) if unsupported_rename(&e) || e.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(e) => return Err(e),
+    }
+    match attempt(RenameMethod::Weak) {
+        Ok(()) => Ok(RenameResult::Renamed),
+        Err(e) if cross_device(&e) => Ok(RenameResult::CopyRequired),
+        Err(e) => Err(e),
+    }
+}
+fn attempt_rename(method: RenameMethod, source: &Path, dest: &Path) -> std::io::Result<()> {
+    match method {
+        RenameMethod::Atomic => publish(source, dest),
+        RenameMethod::HardLink => fs::hard_link(source, dest),
+        RenameMethod::Weak => {
+            if dest.try_exists()? {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            fs::rename(source, dest)
+        }
+    }
+}
+fn rename_logged(
+    source: &Path,
+    dest: &Path,
+    journal: &mut Journal,
+    row: &mut LogRow,
+) -> Result<RenameResult> {
+    rename_logged_with(source, dest, journal, row, attempt_rename)
+}
+fn rename_logged_with(
+    source: &Path,
+    dest: &Path,
+    journal: &mut Journal,
+    row: &mut LogRow,
+    mut attempt: impl FnMut(RenameMethod, &Path, &Path) -> std::io::Result<()>,
+) -> Result<RenameResult> {
+    let different = different_devices(source, dest.parent().context("no destination parent")?)?;
+    let expected = regular(source)?;
+    let result = rename_with(different, |method| {
+        row.guard = method.guard().into();
+        if method == RenameMethod::Weak {
+            journal
+                .row(row)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        same_stat(&expected, source).map_err(|e| std::io::Error::other(e.to_string()))?;
+        attempt(method, source, dest)
+    })?;
+    Ok(result)
+}
+fn stream_copy(source: &mut impl Read, output: &mut impl Write) -> Result<(u64, String)> {
+    let mut hash = blake3::Hasher::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    let mut size = 0;
+    loop {
+        let n = source.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+        output.write_all(&buffer[..n])?;
+        size += n as u64;
+    }
+    Ok((size, hash.finalize().to_hex().to_string()))
+}
 fn transfer(
     action: &Action,
     journal: &mut Journal,
@@ -358,18 +531,23 @@ fn transfer_with(
             .all(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mxf"))),
         "transfers can only read and write MXF media"
     );
-    unchanged(
+    let before = restat(
         &action.file,
         &action.source,
-        &action.checksum,
         action.source == action.file.path,
     )?;
     if action.duplicate {
         ensure!(
-            regular(&action.dest)?.len() == action.file.size
-                && checksum(&action.dest)? == action.checksum,
-            "duplicate destination changed"
+            !action.checksum.is_empty(),
+            "duplicate has no verified checksum"
         );
+        ensure!(
+            checksum(&action.source)? == action.checksum
+                && regular(&action.dest)?.len() == action.file.size
+                && checksum(&action.dest)? == action.checksum,
+            "duplicate source or destination changed"
+        );
+        same_stat(&before, &action.source)?;
         row.status = "duplicate".into();
         journal.row(row)?;
         return Ok(());
@@ -381,18 +559,32 @@ fn transfer_with(
     let parent = action.dest.parent().context("no parent")?;
     fs::create_dir_all(parent)?;
     row.status = "intent".into();
+    // A rename does not need to read media. Empty checksum explicitly records that.
+    if action.op == Operation::Move {
+        row.checksum.clear();
+    }
     journal.row(row)?;
     if action.op == Operation::Move && !force_copy {
-        match publish(&action.source, &action.dest) {
-            Ok(()) => {
+        same_stat(&before, &action.source)?;
+        match rename_logged(&action.source, &action.dest, journal, row)? {
+            RenameResult::Renamed => {
                 row.status = "done".into();
                 journal.row(row)?;
                 return Ok(());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e.into()),
-            Err(_) => {} // Different filesystem or unsupported atomic rename: verified copy.
+            RenameResult::Linked => {
+                row.status = "published".into();
+                journal.row(row)?;
+                same_stat(&before, &action.source)?;
+                fs::remove_file(&action.source)?;
+                row.status = "done".into();
+                journal.row(row)?;
+                return Ok(());
+            }
+            RenameResult::CopyRequired => {}
         }
     }
+    row.guard = "verified-copy".into();
     let partial = parent.join(format!(
         "{}.mobboss-partial",
         action
@@ -408,34 +600,35 @@ fn transfer_with(
         .context("partial file exists; inspect it before retrying")?;
     let result = (|| -> Result<()> {
         let mut source = File::open(&action.source)?;
-        std::io::copy(&mut source, &mut output)?;
+        let (size, hash) = stream_copy(&mut source, &mut output)?;
+        ensure!(size == action.file.size, "source size changed during copy");
+        // If a collision/undo supplied a prior checksum, streaming also validates it.
+        ensure!(
+            action.checksum.is_empty() || hash == action.checksum,
+            "source checksum changed"
+        );
         output.flush()?;
         output.sync_all()?;
         after_copy(&partial)?;
         ensure!(
-            regular(&partial)?.len() == action.file.size && checksum(&partial)? == action.checksum,
+            regular(&partial)?.len() == size && checksum(&partial)? == hash,
             "copy verification failed; source retained"
         );
-        unchanged(
-            &action.file,
-            &action.source,
-            &action.checksum,
-            action.source == action.file.path,
-        )?;
-        publish(&partial, &action.dest)?;
+        same_stat(&before, &action.source)?;
+        row.checksum = hash;
+        match rename_logged(&partial, &action.dest, journal, row)? {
+            RenameResult::Renamed => {}
+            RenameResult::Linked => {
+                fs::remove_file(&partial)?;
+            }
+            RenameResult::CopyRequired => bail!("partial unexpectedly on another filesystem"),
+        }
+        // Keep the publication guard while identifying this as a verified copy.
+        row.guard = format!("verified-copy; {}", row.guard);
         row.status = "published".into();
         journal.row(row)?;
         if action.op == Operation::Move {
-            ensure!(
-                checksum(&action.dest)? == action.checksum,
-                "destination verification failed; source retained"
-            );
-            unchanged(
-                &action.file,
-                &action.source,
-                &action.checksum,
-                action.source == action.file.path,
-            )?;
+            same_stat(&before, &action.source)?;
             fs::remove_file(&action.source)?;
         }
         row.status = "done".into();
@@ -507,12 +700,19 @@ pub fn execute(
             size: a.file.size,
             checksum: a.checksum.clone(),
             status: String::new(),
+            guard: String::new(),
         };
         let result = if a.step > 0 && failed.contains(&a.file.path) {
             Err(anyhow::anyhow!("dependent collect step skipped"))
         } else {
             transfer(a, &mut journal, &mut row, false)
         };
+        if row.guard.contains("weaker guard") {
+            outcome.warnings.push(format!(
+                "{}: used check-then-rename with a weaker overwrite guard",
+                a.dest.display()
+            ));
+        }
         match result {
             Ok(()) if a.duplicate => outcome.skipped += 1,
             Ok(()) => {
@@ -533,8 +733,21 @@ pub fn execute(
                     .push(format!("{}: {e}", a.source.display()));
                 if row.status == "published" || row.status == "done" {
                     // Preserve recovery information if a failure happens after publication.
-                    if a.dest.is_file() && checksum(&a.dest)? == a.checksum {
-                        index.record_transfer(&a.file, &a.source, &a.dest, !a.source.exists())?;
+                    let verified = if row.checksum.is_empty() {
+                        regular(&a.dest).is_ok_and(|m| {
+                            m.len() == a.file.size && stamp(&m) == a.file.modified_ns
+                        })
+                    } else {
+                        checksum(&a.dest).is_ok_and(|hash| hash == row.checksum)
+                    };
+                    if verified {
+                        if let Err(error) =
+                            index.record_transfer(&a.file, &a.source, &a.dest, !a.source.exists())
+                        {
+                            outcome
+                                .warnings
+                                .push(format!("Could not reconcile index: {error}"));
+                        }
                     }
                 } else {
                     row.status = format!("skipped: {e}");
@@ -713,7 +926,14 @@ pub fn undo(
                 .into_iter()
                 .find(|f| f.path == row.dest)
                 .context("undo destination is not indexed")?;
-            unchanged(&file, &row.dest, &row.checksum, false)?;
+            let before = restat(&file, &row.dest, true)?;
+            if row.op == "copy" {
+                ensure!(
+                    !row.checksum.is_empty() && checksum(&row.dest)? == row.checksum,
+                    "copy checksum changed"
+                );
+                same_stat(&before, &row.dest)?;
+            }
             let mut undo_row = LogRow {
                 op: "undo".into(),
                 source: row.dest.clone(),
@@ -721,6 +941,7 @@ pub fn undo(
                 size: row.size,
                 checksum: row.checksum.clone(),
                 status: "intent".into(),
+                guard: String::new(),
             };
             if row.op == "copy" {
                 journal.row(&undo_row)?;
@@ -821,6 +1042,7 @@ mod tests {
             size: 8,
             checksum: action.checksum.clone(),
             status: String::new(),
+            guard: String::new(),
         };
         assert!(transfer_with(
             &action,
@@ -857,5 +1079,249 @@ mod tests {
         assert!(publish(&source, &dest).is_err());
         assert_eq!(fs::read_to_string(source).unwrap(), "source");
         assert_eq!(fs::read_to_string(dest).unwrap(), "destination");
+    }
+    #[test]
+    fn protected_roots_are_configurable_without_a_developer_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("protected");
+        fs::create_dir(&root).unwrap();
+        assert!(check_protected(&root.join("file.mxf"), [root.clone()]).is_err());
+        assert!(check_protected(&dir.path().join("protected-other/file.mxf"), [root]).is_ok());
+    }
+    fn indexed_fixture(dir: &Path) -> (Index, MediaFile) {
+        let path = dir.join("drive/Avid MediaFiles/MXF/1/a.mxf");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "original media").unwrap();
+        let file = MediaFile {
+            path: path.clone(),
+            folder: path.parent().unwrap().into(),
+            size: 14,
+            modified_ns: stamp(&fs::metadata(&path).unwrap()),
+            metadata: crate::MediaMetadata {
+                project: Some("Film".into()),
+                ..Default::default()
+            },
+        };
+        let mut index = Index::open(&dir.join("data/index.sqlite")).unwrap();
+        index.record_transfer(&file, &path, &path, false).unwrap();
+        (index, file)
+    }
+    #[test]
+    fn planning_reads_no_media_when_no_destination_conflicts_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let (index, _) = indexed_fixture(dir.path());
+        let p = prepare_with(
+            &index,
+            Operation::Copy,
+            "Film",
+            &[],
+            Some(&dir.path().join("shuttle")),
+            |_| panic!("plan read media without a collision"),
+        )
+        .unwrap();
+        assert_eq!(p.actions.len(), 1);
+        assert!(p.actions[0].checksum.is_empty());
+    }
+    #[test]
+    fn planning_hashes_only_a_matching_size_collision_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let (index, file) = indexed_fixture(dir.path());
+        let dest = dir.path().join("shuttle");
+        let target = plan::project_dir(&dest, "Film").join("Avid MediaFiles/MXF/1/a.mxf");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(&file.path, &target).unwrap();
+        fs::write(target.with_file_name("unrelated.mxf"), "do not hash this").unwrap();
+        let mut reads = vec![];
+        let p = prepare_with(&index, Operation::Copy, "Film", &[], Some(&dest), |p| {
+            reads.push(p.to_path_buf());
+            checksum(p)
+        })
+        .unwrap();
+        assert!(p.actions[0].duplicate);
+        assert_eq!(reads, vec![file.path, target]);
+    }
+    #[test]
+    fn unknown_avid_ancestry_requires_destination_for_every_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut index, file) = indexed_fixture(dir.path());
+        let arbitrary = dir.path().join("arbitrary/a.mxf");
+        fs::create_dir_all(arbitrary.parent().unwrap()).unwrap();
+        fs::rename(&file.path, &arbitrary).unwrap();
+        index
+            .record_transfer(&file, &file.path, &arbitrary, true)
+            .unwrap();
+        for op in [Operation::Move, Operation::Copy, Operation::Collect] {
+            let error = prepare(&index, op, "Film", &[], None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("explicit destination"), "{error}");
+            let p = prepare(&index, op, "Film", &[], Some(&dir.path().join("chosen"))).unwrap();
+            assert!(p
+                .actions
+                .iter()
+                .all(|a| a.dest.starts_with(dir.path().join("chosen"))));
+        }
+    }
+    #[test]
+    fn streaming_copy_reads_source_once_and_hashes_the_written_bytes() {
+        struct Once {
+            data: std::io::Cursor<Vec<u8>>,
+            bytes: usize,
+        }
+        impl Read for Once {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.data.read(buf)?;
+                self.bytes += n;
+                Ok(n)
+            }
+        }
+        let data = vec![7; 3 * 1024 * 1024 + 17];
+        let mut source = Once {
+            data: std::io::Cursor::new(data.clone()),
+            bytes: 0,
+        };
+        let mut output = vec![];
+        let (size, hash) = stream_copy(&mut source, &mut output).unwrap();
+        assert_eq!(source.bytes, data.len());
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(output, data);
+        assert_eq!(hash, blake3::hash(&output).to_hex().to_string());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rename_fallbacks_distinguish_unsupported_cross_device_and_fatal_errors() {
+        use std::io::{Error, ErrorKind};
+        for code in [libc::EINVAL, libc::ENOTSUP, libc::ENOSYS] {
+            let mut calls = vec![];
+            let result = rename_with(false, |method| {
+                calls.push(method);
+                if method == RenameMethod::Atomic {
+                    Err(Error::from_raw_os_error(code))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+            assert_eq!(result, RenameResult::Linked);
+            assert_eq!(calls, vec![RenameMethod::Atomic, RenameMethod::HardLink]);
+        }
+        let mut calls = vec![];
+        assert_eq!(
+            rename_with(false, |method| {
+                calls.push(method);
+                Err(Error::from_raw_os_error(libc::EXDEV))
+            })
+            .unwrap(),
+            RenameResult::CopyRequired
+        );
+        assert_eq!(calls, vec![RenameMethod::Atomic]);
+        assert_eq!(
+            rename_with(true, |_| Err(Error::from_raw_os_error(libc::EINVAL))).unwrap(),
+            RenameResult::CopyRequired
+        );
+        for code in [libc::EACCES, libc::EIO, libc::EEXIST] {
+            let mut calls = vec![];
+            assert!(rename_with(false, |method| {
+                calls.push(method);
+                Err(Error::from_raw_os_error(code))
+            })
+            .is_err());
+            assert_eq!(calls, vec![RenameMethod::Atomic]);
+        }
+        let mut calls = vec![];
+        assert!(rename_with(false, |method| {
+            calls.push(method);
+            if method == RenameMethod::Atomic {
+                Err(Error::from_raw_os_error(libc::EINVAL))
+            } else {
+                Err(Error::from(ErrorKind::AlreadyExists))
+            }
+        })
+        .is_err());
+        assert_eq!(calls, vec![RenameMethod::Atomic, RenameMethod::HardLink]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn weaker_rename_guard_is_journaled_before_rename_and_never_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, file) = indexed_fixture(dir.path());
+        let dest = dir.path().join("dest.mxf");
+        let mut journal = Journal::new(&[], &dir.path().join("logs")).unwrap();
+        let log = journal.paths()[0].clone();
+        let mut row = LogRow {
+            op: "move".into(),
+            source: file.path.clone(),
+            dest: dest.clone(),
+            size: file.size,
+            checksum: String::new(),
+            status: "intent".into(),
+            guard: String::new(),
+        };
+        let result = rename_logged_with(
+            &file.path,
+            &dest,
+            &mut journal,
+            &mut row,
+            |method, source, dest| {
+                if method != RenameMethod::Weak {
+                    return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+                }
+                let rows = read_log(&log).unwrap();
+                assert!(rows.last().unwrap().guard.contains("weaker guard"));
+                assert!(source.exists());
+                assert!(!dest.exists());
+                attempt_rename(method, source, dest)
+            },
+        )
+        .unwrap();
+        assert_eq!(result, RenameResult::Renamed);
+        assert!(!file.path.exists());
+        assert_eq!(fs::read_to_string(dest).unwrap(), "original media");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn same_device_rename_succeeds_without_read_permission_or_a_checksum() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, file) = indexed_fixture(dir.path());
+        let dest = dir.path().join("dest.mxf");
+        fs::set_permissions(&file.path, fs::Permissions::from_mode(0o000)).unwrap();
+        let action = Action {
+            op: Operation::Move,
+            source: file.path.clone(),
+            dest: dest.clone(),
+            file: file.clone(),
+            checksum: String::new(),
+            duplicate: false,
+            step: 0,
+        };
+        let mut row = LogRow {
+            op: "move".into(),
+            source: file.path,
+            dest: dest.clone(),
+            size: file.size,
+            checksum: String::new(),
+            status: String::new(),
+            guard: String::new(),
+        };
+        let mut journal = Journal::new(&[], &dir.path().join("logs")).unwrap();
+        transfer(&action, &mut journal, &mut row, false).unwrap();
+        assert!(row.checksum.is_empty());
+        assert_eq!(row.guard, "atomic-noreplace");
+        fs::set_permissions(dest, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[test]
+    fn legacy_six_column_logs_remain_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.csv");
+        fs::write(
+            &path,
+            "op,source,dest,size,checksum,status\ncopy,/source.mxf,/dest.mxf,1,abc,done\n",
+        )
+        .unwrap();
+        let rows = read_log(&path).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].guard.is_empty());
+        assert_eq!(rows[0].checksum, "abc");
     }
 }
