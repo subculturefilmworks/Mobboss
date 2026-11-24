@@ -41,6 +41,10 @@ fn copied_sample_previews() -> anyhow::Result<()> {
             m.track_kind.as_deref() == Some("video")
                 && m.codec.as_deref() == Some("DNxHR SQ")
                 && m.duration.is_some_and(|n| n > 1)
+                && candidates.iter().any(|(_, a, _)| {
+                    a.track_kind.as_deref() == Some("audio")
+                        && a.material_package_uid == m.material_package_uid
+                })
         })
         .min_by_key(|(_, _, size)| *size)
         .expect("sample DNxHR video");
@@ -94,9 +98,65 @@ fn copied_sample_previews() -> anyhow::Result<()> {
         }
         copies.push(file);
     }
+    let audio = candidates
+        .iter()
+        .find(|(_, m, _)| {
+            m.track_kind.as_deref() == Some("audio")
+                && m.material_package_uid == copies[0].metadata.material_package_uid
+        })
+        .expect("matching sample audio");
+    let audio_path = media.join("sample-audio.mxf");
+    fs::copy(&audio.0, &audio_path)?;
+    let stat = fs::metadata(&audio_path)?;
+    copies.push(MediaFile {
+        path: audio_path,
+        folder: media.clone(),
+        size: stat.len(),
+        modified_ns: stat
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+            .to_string(),
+        metadata: audio.1.clone(),
+    });
+    let clip = mobboss_core::clips::group(copies)
+        .into_iter()
+        .find(|c| {
+            c.files
+                .iter()
+                .any(|f| f.metadata.track_kind.as_deref() == Some("audio"))
+        })
+        .unwrap();
+    let proxy = cache.proxy(
+        &ffmpeg,
+        &clip,
+        &[0],
+        mobboss_core::previews::ProxyPlatform::current(),
+        &token,
+        |_| {},
+    )?;
+    assert!(fs::metadata(&proxy)?.len() > 1000);
+    let probe = ffmpeg.binary.with_file_name(if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    });
+    if probe.exists() {
+        let result = std::process::Command::new(probe)
+            .args(["-v", "error", "-show_streams", "-of", "json"])
+            .arg(&proxy)
+            .output()?;
+        assert!(result.status.success());
+        let data: serde_json::Value = serde_json::from_slice(&result.stdout)?;
+        let streams = data["streams"].as_array().unwrap();
+        assert!(streams.iter().any(|s| s["codec_type"] == "video"));
+        assert!(streams
+            .iter()
+            .any(|s| s["codec_type"] == "audio" && s["channels"] == 2));
+    }
     assert_eq!(
         fs::read_dir(&media)?.count(),
-        3,
+        4,
         "only copied inputs in media"
     );
     Ok(())

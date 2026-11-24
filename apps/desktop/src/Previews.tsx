@@ -5,6 +5,7 @@ export interface PreviewStatus {
   available: boolean;
   message: string;
   thumbnails: Record<string, string>;
+  cache_bytes?: number;
 }
 interface ThumbnailProgress {
   done: number;
@@ -47,7 +48,14 @@ export function usePreviews(desktop: boolean, files: unknown) {
       );
       cleanups.push(
         await listen<boolean>("thumbnails-finished", () => {
-          if (!disposed) setRunning(false);
+          if (!disposed) {
+            setRunning(false);
+            invoke<PreviewStatus>("preview_status")
+              .then((s) => {
+                if (!disposed) setStatus(s);
+              })
+              .catch(() => {});
+          }
         }),
       );
       const s = await invoke<PreviewStatus>("preview_status");
@@ -71,6 +79,8 @@ export function usePreviews(desktop: boolean, files: unknown) {
   }, [desktop, files]);
   return {
     status,
+    refresh: async () =>
+      setStatus(await invoke<PreviewStatus>("preview_status")),
     progress,
     running,
     errors,

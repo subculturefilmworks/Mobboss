@@ -30,6 +30,8 @@ import {
 import "./style.css";
 import Operations from "./Operations";
 import { usePreviews } from "./Previews";
+import Player from "./Player";
+import type { Clip } from "./model";
 import ClipTable from "./ClipTable";
 import { groupClips } from "./model";
 const desktop = "__TAURI_INTERNALS__" in window;
@@ -42,6 +44,7 @@ const emptyFilters: Filters = {
   diff: "",
 };
 function App() {
+  const [player, setPlayer] = useState<Clip | null>(null);
   const [files, setFiles] = useState<MediaFile[]>([]);
   const previews = usePreviews(desktop, files);
   const [archived, setArchived] = useState<MediaFile[]>([]);
@@ -49,6 +52,7 @@ function App() {
     index: "",
     roots: [],
     concurrency: 8,
+    preview_cache_bytes: 5_000_000_000,
   });
   const [volumes, setVolumes] = useState<Volume[]>([]);
   const [view, setView] = useStored("mobboss.view", "files");
@@ -617,6 +621,7 @@ function App() {
           {view !== "files" ? (
             <ClipTable
               thumbnailErrors={previews.errors}
+              onPreview={setPlayer}
               thumbnails={previews.status.thumbnails}
               grid={view === "grid"}
               clips={clips}
@@ -727,6 +732,14 @@ function App() {
           </footer>
         </main>
       </div>
+      {player && (
+        <Player
+          key={player.id}
+          clip={player}
+          poster={previews.status.thumbnails[player.id]}
+          onClose={() => setPlayer(null)}
+        />
+      )}
       {settingsOpen && (
         <div className="modal-backdrop">
           <section
@@ -770,6 +783,41 @@ function App() {
               8 is the default. Mounted shares must be connected in Finder or
               Explorer to appear in Sources.
             </p>
+            <label>
+              Preview cache limit (GB)
+              <input
+                type="number"
+                min="0.1"
+                max="1000"
+                step="0.1"
+                value={settings.preview_cache_bytes / 1_000_000_000}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    preview_cache_bytes: Math.round(
+                      Number(e.target.value) * 1_000_000_000,
+                    ),
+                  })
+                }
+              />
+            </label>
+            <p className="hint">
+              Least recently used previews are removed first. Current usage:{" "}
+              {bytes(previews.status.cache_bytes || 0)}.
+            </p>
+            <button
+              disabled={!desktop || busy}
+              onClick={() =>
+                run(async () => {
+                  setPlayer(null);
+                  await invoke("clear_preview_cache");
+                  await previews.refresh();
+                  setNotice("Preview cache cleared");
+                })
+              }
+            >
+              Clear preview cache
+            </button>
             <div className="modal-actions">
               <button
                 onClick={() => {

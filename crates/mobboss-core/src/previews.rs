@@ -414,3 +414,383 @@ mod tests {
             .any(|p| p.file_name().to_string_lossy().contains("partial")));
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyPlatform {
+    Mac,
+    Windows,
+    Linux,
+}
+impl ProxyPlatform {
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+    pub fn extension(self) -> &'static str {
+        if self == Self::Linux {
+            "webm"
+        } else {
+            "mp4"
+        }
+    }
+}
+pub fn audio_files(clip: &Clip) -> Vec<&MediaFile> {
+    let mut seen = std::collections::BTreeSet::new();
+    clip.files
+        .iter()
+        .filter(|f| f.metadata.track_kind.as_deref() == Some("audio"))
+        .filter(|f| {
+            seen.insert(
+                f.metadata
+                    .file_package_uid
+                    .clone()
+                    .unwrap_or_else(|| f.path.to_string_lossy().into()),
+            )
+        })
+        .collect()
+}
+fn proxy_inputs<'a>(
+    clip: &'a Clip,
+    tracks: &[usize],
+) -> Result<(Option<&'a MediaFile>, Vec<&'a MediaFile>)> {
+    ensure!(tracks.len() <= 2, "Choose at most two audio tracks");
+    ensure!(
+        tracks.len() != 2 || tracks[0] != tracks[1],
+        "Choose different audio tracks"
+    );
+    let audio = audio_files(clip);
+    let selected = tracks
+        .iter()
+        .map(|i| audio.get(*i).copied().context("Invalid audio track"))
+        .collect::<Result<Vec<_>>>()?;
+    let video = clip
+        .files
+        .iter()
+        .find(|f| f.metadata.track_kind.as_deref() == Some("video"));
+    ensure!(
+        video.is_some() || !selected.is_empty(),
+        "No playable video or audio in clip"
+    );
+    Ok((video, selected))
+}
+pub fn proxy_key(clip: &Clip, tracks: &[usize], platform: ProxyPlatform) -> Result<String> {
+    let (video, audio) = proxy_inputs(clip, tracks)?;
+    let mut hash = blake3::Hasher::new();
+    hash.update(format!("proxy-v1-{platform:?}").as_bytes());
+    for file in video.into_iter().chain(audio) {
+        hash.update(cache_key(file).as_bytes());
+    }
+    Ok(hash.finalize().to_hex().to_string())
+}
+fn tc_seconds(file: &MediaFile) -> Option<f64> {
+    let m = &file.metadata;
+    let rate = m
+        .timecode_rate
+        .as_ref()
+        .map(|r| f64::from(r.numerator) / f64::from(r.denominator))
+        .or(m.timecode_fps.map(f64::from))?;
+    (rate > 0.0)
+        .then(|| m.start_timecode.map(|n| n as f64 / rate))
+        .flatten()
+}
+pub fn proxy_args(
+    clip: &Clip,
+    tracks: &[usize],
+    platform: ProxyPlatform,
+    output: &Path,
+) -> Result<Vec<OsString>> {
+    let (video, audio) = proxy_inputs(clip, tracks)?;
+    let mut args = strings(&["-y"]);
+    for file in video.into_iter().chain(audio.iter().copied()) {
+        args.extend(strings(&["-threads", "2", "-i"]));
+        args.push(file.path.as_os_str().into());
+    }
+    let mut filters = Vec::new();
+    if video.is_some() {
+        filters.push("[0:v:0]setpts=PTS-STARTPTS,scale=w='min(960,iw)':h='min(540,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=rgba,split[fg][bg];[bg]lutrgb=r=32:g=32:b=32:a=255[base];[base][fg]overlay=shortest=1:format=auto,format=yuv420p[v]".to_string());
+    }
+    let origin = video
+        .or_else(|| audio.first().copied())
+        .and_then(tc_seconds);
+    for (i, file) in audio.iter().enumerate() {
+        let delta = tc_seconds(file)
+            .zip(origin)
+            .map(|(a, v)| a - v)
+            .unwrap_or(0.0);
+        // Account for timecode rolling over midnight.
+        let delta = if delta > 43200.0 {
+            delta - 86400.0
+        } else if delta < -43200.0 {
+            delta + 86400.0
+        } else {
+            delta
+        };
+        let input = i + usize::from(video.is_some());
+        filters.push(format!("[{input}:a:0]atrim=start={:.6},asetpts=PTS-STARTPTS,pan=mono|c0=c0,adelay={}:all=1,apad[a{i}]",(-delta).max(0.0),(delta.max(0.0)*1000.0).round() as u64));
+    }
+    match audio.len() {
+        1 => filters.push("[a0]pan=stereo|c0=c0|c1=c0[a]".into()),
+        2 => filters.push("[a0][a1]amerge=inputs=2,pan=stereo|c0=c0|c1=c1[a]".into()),
+        _ => {}
+    }
+    args.extend(strings(&[
+        "-filter_complex_threads",
+        "1",
+        "-filter_complex",
+        &filters.join(";"),
+    ]));
+    if video.is_some() {
+        args.extend(strings(&[
+            "-map",
+            "[v]",
+            "-c:v",
+            match platform {
+                ProxyPlatform::Mac => "h264_videotoolbox",
+                ProxyPlatform::Windows => "h264_mf",
+                ProxyPlatform::Linux => "libvpx",
+            },
+            "-b:v",
+            "1800k",
+            "-pix_fmt",
+            "yuv420p",
+        ]));
+        if platform == ProxyPlatform::Linux {
+            args.extend(strings(&["-deadline", "realtime", "-cpu-used", "4"]));
+        }
+        if platform == ProxyPlatform::Windows {
+            args.extend(strings(&["-hw_encoding", "1"]));
+        }
+    }
+    if !audio.is_empty() {
+        args.extend(strings(&[
+            "-map",
+            "[a]",
+            "-c:a",
+            if platform == ProxyPlatform::Linux {
+                "libopus"
+            } else {
+                "aac"
+            },
+            "-b:a",
+            "128k",
+            "-ar",
+            "48000",
+        ]));
+    }
+    let duration = video
+        .map(seconds)
+        .unwrap_or_else(|| audio.iter().map(|f| seconds(f)).fold(0.0, f64::max));
+    ensure!(
+        duration > 0.0 && duration.is_finite(),
+        "Unknown clip duration; rescan headers"
+    );
+    args.extend(strings(&["-t", &format!("{duration:.6}"), "-threads", "2"]));
+    if platform != ProxyPlatform::Linux {
+        args.extend(strings(&["-movflags", "+faststart"]));
+    }
+    args.extend(strings(&[
+        "-f",
+        if platform == ProxyPlatform::Linux {
+            "webm"
+        } else {
+            "mp4"
+        },
+    ]));
+    args.push(output.as_os_str().into());
+    Ok(args)
+}
+impl PreviewCache {
+    pub fn proxy(
+        &self,
+        ffmpeg: &Ffmpeg,
+        clip: &Clip,
+        tracks: &[usize],
+        platform: ProxyPlatform,
+        cancel: &CancellationToken,
+        progress: impl FnMut(f64),
+    ) -> Result<PathBuf> {
+        let (video, audio) = proxy_inputs(clip, tracks)?;
+        for file in video.into_iter().chain(audio.iter().copied()) {
+            verify_source(file)?;
+        }
+        self.generate(
+            &proxy_key(clip, tracks, platform)?,
+            platform.extension(),
+            |temp| ffmpeg.run(&proxy_args(clip, tracks, platform, temp)?, cancel, progress),
+        )
+    }
+    fn entries(&self) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some((key, ext)) = name.rsplit_once('.') else {
+                continue;
+            };
+            if key.len() != 64
+                || !key.bytes().all(|b| b.is_ascii_hexdigit())
+                || !["jpg", "mp4", "webm"].contains(&ext)
+            {
+                continue;
+            }
+            if entry.file_type()?.is_file() {
+                let m = entry.metadata()?;
+                files.push((path, m.len(), m.modified()?));
+            }
+        }
+        Ok(files)
+    }
+    pub fn size(&self) -> Result<u64> {
+        Ok(self.entries()?.iter().map(|(_, n, _)| n).sum())
+    }
+    /// Modification times are access times for immutable completed previews.
+    /// Locked generations and the currently playing file are never evicted.
+    pub fn prune(&self, cap: u64, protected: &[PathBuf]) -> Result<u64> {
+        let mut entries = self.entries()?;
+        entries.sort_by_key(|(_, _, time)| *time);
+        let mut size: u64 = entries.iter().map(|(_, n, _)| n).sum();
+        for (path, n, _) in entries {
+            if size <= cap {
+                break;
+            }
+            if protected.contains(&path) {
+                continue;
+            }
+            let lock_path = path.with_file_name(format!(
+                "{}.lock",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
+                continue;
+            }
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)?;
+            if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
+                continue;
+            }
+            match fs::remove_file(path) {
+                Ok(()) => size = size.saturating_sub(n),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => size = size.saturating_sub(n),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(size)
+    }
+    pub fn clear(&self) -> Result<()> {
+        self.prune(0, &[])?;
+        // Leave locks and in-progress partials alone: callers cancel/join workers first.
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    fn clip() -> Clip {
+        let mut files = Vec::new();
+        for (i, kind) in ["video", "audio", "audio", "audio"].into_iter().enumerate() {
+            files.push(MediaFile {
+                path: format!("/media/input {i}.mxf").into(),
+                folder: "/media".into(),
+                size: 10,
+                modified_ns: "0".into(),
+                metadata: crate::MediaMetadata {
+                    file_package_uid: Some(format!("uid-{i}")),
+                    track_kind: Some(kind.into()),
+                    duration: Some(100),
+                    edit_rate: Some(crate::Rational {
+                        numerator: 25,
+                        denominator: 1,
+                    }),
+                    start_timecode: Some(0),
+                    timecode_fps: Some(25),
+                    ..Default::default()
+                },
+            });
+        }
+        crate::clips::group(files)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| unreachable!())
+    }
+    fn grouped() -> Clip {
+        let mut c = clip();
+        let mut files = Vec::new();
+        for (i, kind) in ["video", "audio", "audio", "audio"].into_iter().enumerate() {
+            let mut f = c.files[0].clone();
+            f.path = format!("/media/input {i}.mxf").into();
+            f.metadata.file_package_uid = Some(format!("uid-{i}"));
+            f.metadata.track_kind = Some(kind.into());
+            files.push(f);
+        }
+        c.files = files;
+        c
+    }
+    #[test]
+    fn hardware_platforms_channels_and_proxy_keys() {
+        let clip = grouped();
+        let out = Path::new("/cache/proxy.mp4");
+        for (platform, encoder) in [
+            (ProxyPlatform::Mac, "h264_videotoolbox"),
+            (ProxyPlatform::Windows, "h264_mf"),
+            (ProxyPlatform::Linux, "libvpx"),
+        ] {
+            let args = proxy_args(&clip, &[0, 1], platform, out).unwrap();
+            assert!(args.iter().any(|s| s == encoder));
+            let graph = args
+                .iter()
+                .find(|s| s.to_string_lossy().contains("amerge="))
+                .unwrap()
+                .to_string_lossy();
+            assert!(graph.contains("[1:a:0]"));
+            assert!(graph.contains("[2:a:0]"));
+            assert!(graph.contains("c1=c1"));
+            assert_eq!(
+                args.iter().any(|s| s == "+faststart"),
+                platform != ProxyPlatform::Linux
+            );
+        }
+        let mono = proxy_args(&clip, &[0], ProxyPlatform::Mac, out).unwrap();
+        assert!(mono.iter().any(|s| s.to_string_lossy().contains("c1=c0")));
+        assert_ne!(
+            proxy_key(&clip, &[0, 1], ProxyPlatform::Mac).unwrap(),
+            proxy_key(&clip, &[1, 2], ProxyPlatform::Mac).unwrap()
+        );
+        assert!(proxy_args(&clip, &[3], ProxyPlatform::Mac, out).is_err());
+        assert!(proxy_args(&clip, &[0, 0], ProxyPlatform::Mac, out).is_err());
+    }
+    #[test]
+    fn lru_keeps_recent_and_protected_and_clear_ignores_unrelated_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(temp.path()).unwrap();
+        let keys = ["1".repeat(64), "2".repeat(64), "3".repeat(64)];
+        let mut paths = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            let path = cache.path(key, "mp4").unwrap();
+            fs::write(&path, [0; 10]).unwrap();
+            File::open(&path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(i as u64))
+                .unwrap();
+            paths.push(path);
+        }
+        assert_eq!(cache.prune(20, &[paths[0].clone()]).unwrap(), 20);
+        assert!(paths[0].exists());
+        assert!(!paths[1].exists());
+        assert!(paths[2].exists());
+        fs::write(temp.path().join("unrelated.txt"), "keep").unwrap();
+        cache.clear().unwrap();
+        assert_eq!(cache.size().unwrap(), 0);
+        assert!(temp.path().join("unrelated.txt").exists());
+    }
+}

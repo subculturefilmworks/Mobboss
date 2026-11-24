@@ -71,6 +71,7 @@ export interface Settings {
   index: string;
   roots: string[];
   concurrency: number;
+  preview_cache_bytes: number;
 }
 export interface Volume {
   name: string;
@@ -345,7 +346,7 @@ export function groupClips(files: MediaFile[]): Clip[] {
     members.sort(
       (a, b) =>
         (a.metadata.track_id ?? 0) - (b.metadata.track_id ?? 0) ||
-        a.path.localeCompare(b.path),
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
     );
     const first =
       members.find((f) => f.metadata.track_kind === "video") || members[0];

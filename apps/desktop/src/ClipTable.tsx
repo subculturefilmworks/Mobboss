@@ -17,11 +17,13 @@ export default function ClipTable({
   thumbnails = {},
   thumbnailErrors = {},
   grid = false,
+  onPreview,
 }: {
   clips: Clip[];
   thumbnails?: Record<string, string>;
   thumbnailErrors?: Record<string, string>;
   grid?: boolean;
+  onPreview?: (clip: Clip) => void;
   selected: Set<string>;
   setSelected: (s: Set<string>) => void;
 }) {
@@ -54,13 +56,18 @@ export default function ClipTable({
               tabIndex={0}
               key={clip.id}
               className={`clip-card ${clip.files.every((f) => selected.has(f.path)) ? "selected" : ""}`}
-              onClick={(e) =>
-                setSelected(selectClip(selected, clip, e.ctrlKey || e.metaKey))
-              }
+              onClick={(e) => {
+                setSelected(selectClip(selected, clip, e.ctrlKey || e.metaKey));
+                if (!e.ctrlKey && !e.metaKey) onPreview?.(clip);
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
+                if (
+                  e.target === e.currentTarget &&
+                  (e.key === "Enter" || e.key === " ")
+                ) {
                   e.preventDefault();
-                  setSelected(selectClip(selected, clip));
+                  if (e.key === "Enter") onPreview?.(clip);
+                  else setSelected(selectClip(selected, clip));
                 }
               }}
             >
@@ -85,6 +92,14 @@ export default function ClipTable({
                   {bytes(clip.size)}
                 </small>
                 <small>{timecode(clip.metadata)}</small>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPreview?.(clip);
+                  }}
+                >
+                  ▶ Preview
+                </button>
               </div>
             </article>
           ))}
@@ -144,6 +159,16 @@ export default function ClipTable({
               <div
                 key={file ? `${clip.id}:${file.path}` : clip.id}
                 role="row"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (
+                    e.target === e.currentTarget &&
+                    e.key === "Enter" &&
+                    !file
+                  ) {
+                    onPreview?.(clip);
+                  }
+                }}
                 aria-selected={checked}
                 className={`clip-row ${checked ? "selected" : ""} ${file ? "clip-member" : ""}`}
                 style={{
@@ -155,13 +180,14 @@ export default function ClipTable({
                 onClick={(e) =>
                   file
                     ? setSelected(new Set([file.path]))
-                    : setSelected(
+                    : (onPreview?.(clip),
+                      setSelected(
                         selectClip(
                           selected,
                           clip,
                           e.ctrlKey || e.metaKey || e.shiftKey,
                         ),
-                      )
+                      ))
                 }
               >
                 <input
