@@ -6,7 +6,7 @@ pub(crate) struct AppState {
     pub(crate) settings: Mutex<Settings>,
     pub(crate) active: Mutex<Option<CancellationToken>>,
     pub(crate) preview_clearing: std::sync::atomic::AtomicBool,
-    pub(crate) proxy: Mutex<crate::preview::ProxyState>,
+    pub(crate) streams: mobboss_core::streaming::Streaming,
     pub(crate) thumbnails: Mutex<crate::preview::ThumbnailState>,
     planned: Mutex<Option<mobboss_core::plan::Plan>>,
     undo_log: Mutex<Option<PathBuf>>,
@@ -20,11 +20,7 @@ fn settings(state: State<AppState>) -> Reply<Settings> {
     Ok(state.settings.lock().map_err(err)?.clone())
 }
 #[tauri::command]
-fn save_settings(
-    mut value: Settings,
-    app: tauri::AppHandle,
-    state: State<AppState>,
-) -> Reply<Settings> {
+fn save_settings(mut value: Settings, state: State<AppState>) -> Reply<Settings> {
     let active = state.active.lock().map_err(err)?;
     if active.is_some() {
         return Err("Wait for the current scan before changing settings".into());
@@ -37,18 +33,6 @@ fn save_settings(
         .collect();
     value.save().map_err(err)?;
     *state.settings.lock().map_err(err)? = value.clone();
-    let protected = state
-        .proxy
-        .lock()
-        .map_err(err)?
-        .playing
-        .clone()
-        .into_iter()
-        .collect::<Vec<_>>();
-    crate::preview::cache(&app)
-        .map_err(err)?
-        .prune(value.preview_cache_bytes, &protected)
-        .map_err(err)?;
     Ok(value)
 }
 #[tauri::command]
@@ -80,7 +64,7 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
         return Err("A scan is already running".into());
     }
     crate::preview::cancel_thumbnails(state.clone())?;
-    crate::preview::cancel_proxy(None, state.clone())?;
+    state.streams.stop(None);
     let settings = state.settings.lock().map_err(err)?.clone();
     let token = CancellationToken::default();
     *active = Some(token.clone());
@@ -188,7 +172,7 @@ fn start_operation(
         None
     };
     crate::preview::cancel_thumbnails(state.clone())?;
-    crate::preview::cancel_proxy(None, state.clone())?;
+    state.streams.stop(None);
     let token = CancellationToken::default();
     *active = Some(token.clone());
     std::thread::spawn(move || {
@@ -259,15 +243,27 @@ fn reveal(path: PathBuf, state: State<AppState>) -> Reply<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol("preview", crate::stream::protocol)
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                let state = window.state::<AppState>();
+                state.streams.shutdown();
+                let _ = crate::preview::cancel_thumbnails(state);
+            }
+        })
         .setup(|app| {
             let cache = crate::preview::cache(app.handle())?;
+            cache.remove_legacy_proxies()?;
             app.asset_protocol_scope()
                 .allow_directory(&cache.root, true)?;
             app.manage(AppState {
                 settings: Mutex::new(Settings::load()?),
                 active: Mutex::new(None),
                 preview_clearing: std::sync::atomic::AtomicBool::new(false),
-                proxy: Mutex::new(crate::preview::ProxyState::default()),
+                streams: mobboss_core::streaming::Streaming::default(),
                 thumbnails: Mutex::new(crate::preview::ThumbnailState::default()),
                 planned: Mutex::new(None),
                 undo_log: Mutex::new(None),
@@ -278,9 +274,10 @@ pub fn run() {
             crate::dialog::pick_path,
             crate::preview::preview_status,
             crate::preview::thumbnail_data,
-            crate::preview::prepare_proxy,
-            crate::preview::cancel_proxy,
-            crate::preview::clear_preview_cache,
+            crate::stream::open_stream,
+            crate::stream::stream_tick,
+            crate::stream::stop_stream,
+            crate::preview::clear_thumbnails,
             crate::preview::start_thumbnails,
             crate::preview::prioritize,
             crate::preview::cancel_thumbnails,

@@ -5,7 +5,7 @@ export interface PreviewStatus {
   available: boolean;
   message: string;
   thumbnails: Record<string, string>;
-  cache_bytes?: number;
+  thumbnail_bytes?: number;
 }
 interface ThumbnailProgress {
   done: number;
@@ -132,7 +132,11 @@ export function Poster({
             : label
       }
     >
-      {uncompressedTitle ? label : error ? "Unavailable" : "No preview"}
+      {uncompressedTitle
+        ? "No preview · title"
+        : error
+          ? "Unavailable"
+          : "No preview"}
     </span>
   );
 }

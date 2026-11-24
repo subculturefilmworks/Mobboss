@@ -42,7 +42,7 @@ pub struct PreviewStatus {
     available: bool,
     message: String,
     thumbnails: BTreeMap<String, PathBuf>,
-    cache_bytes: u64,
+    thumbnail_bytes: u64,
 }
 #[tauri::command]
 pub fn preview_status(app: tauri::AppHandle, state: State<AppState>) -> Reply<PreviewStatus> {
@@ -73,7 +73,7 @@ pub fn preview_status(app: tauri::AppHandle, state: State<AppState>) -> Reply<Pr
             "Previews unavailable · bundled ffmpeg was not found. Development builds can set MOBBOSS_FFMPEG.".into()
         },
         thumbnails,
-        cache_bytes: cache.size().map_err(err)?,
+        thumbnail_bytes: cache.size().map_err(err)?,
     })
 }
 #[derive(Default)]
@@ -131,15 +131,6 @@ pub fn start_thumbnails(app: tauri::AppHandle, state: State<AppState>) -> Reply<
         previews::thumbnails(&cache, &ffmpeg, &queue, &token, |p| {
             let _ = app.emit("thumbnail-progress", p);
         });
-        let protected = app
-            .state::<AppState>()
-            .proxy
-            .lock()
-            .ok()
-            .and_then(|p| p.playing.clone())
-            .into_iter()
-            .collect::<Vec<_>>();
-        let _ = cache.prune(settings.preview_cache_bytes, &protected);
         if let Ok(mut active) = app.state::<AppState>().thumbnails.lock() {
             active.active = None;
             active.queue = None;
@@ -189,148 +180,15 @@ pub fn thumbnail_data(
     Ok(data)
 }
 
-#[derive(Default)]
-pub(crate) struct ProxyState {
-    active: Option<(String, CancellationToken)>,
-    pub(crate) playing: Option<PathBuf>,
-    playing_request: Option<String>,
-}
-#[derive(Clone, Serialize)]
-struct ProxyProgress {
-    request_id: String,
-    #[serde(flatten)]
-    status: previews::PreparationProgress,
-}
 #[tauri::command]
-pub fn cancel_proxy(request_id: Option<String>, state: State<AppState>) -> Reply<()> {
-    let mut proxy = state.proxy.lock().map_err(err)?;
-    if let Some((id, token)) = proxy.active.as_ref() {
-        if request_id.as_ref().is_none_or(|r| r == id) {
-            token.cancel();
-        }
-    }
-    if request_id
-        .as_ref()
-        .is_some_and(|id| proxy.playing_request.as_ref() == Some(id))
-    {
-        proxy.playing = None;
-        proxy.playing_request = None;
-    }
-    Ok(())
-}
-#[tauri::command]
-pub async fn prepare_proxy(
-    clip_id: String,
-    tracks: Vec<usize>,
-    request_id: String,
-    app: tauri::AppHandle,
-) -> Reply<previews::ProxyOutput> {
+pub async fn clear_thumbnails(app: tauri::AppHandle) -> Reply<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let token = CancellationToken::default();
-        let (settings, clip, ffmpeg, cache, source) = {
-            let operation = state.active.lock().map_err(err)?;
-            if state
-                .preview_clearing
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                return Err("Preview cache is being cleared".into());
-            }
-            if operation.is_some() {
-                return Err("Wait for the current scan or operation".into());
-            }
-            let settings = state.settings.lock().map_err(err)?.clone();
-            let clip = mobboss_core::clips::group(service::files(&settings).map_err(err)?)
-                .into_iter()
-                .find(|c| c.id == clip_id)
-                .ok_or("Select an indexed clip")?;
-            let ffmpeg = ffmpeg(&app).ok_or("Previews unavailable · ffmpeg is missing")?;
-            let cache = cache(&app).map_err(err)?;
-            service::validate_destination(&cache.root.join("cache-check"), &settings.roots)
-                .map_err(err)?;
-            let source = previews::proxy_source_summary(&clip, &tracks).map_err(err)?;
-            cancel_thumbnails(state.clone())?;
-            let mut proxy = state.proxy.lock().map_err(err)?;
-            if let Some((_, old)) = proxy.active.take() {
-                old.cancel();
-            }
-            proxy.active = Some((request_id.clone(), token.clone()));
-            (settings, clip, ffmpeg, cache, source)
-        };
-        let duration = clip
-            .files
-            .iter()
-            .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
-            .or_else(|| clip.files.first())
-            .map(previews::seconds)
-            .unwrap_or(1.0)
-            .max(0.001);
-        let started = std::time::Instant::now();
-        let publish = |update| {
-            let _ = app.emit(
-                "proxy-progress",
-                ProxyProgress {
-                    request_id: request_id.clone(),
-                    status: previews::preparation_progress(
-                        update,
-                        duration,
-                        source,
-                        started.elapsed(),
-                    ),
-                },
-            );
-        };
-        publish(previews::FfmpegProgress::default());
-        let result = cache
-            .proxy_with_fallback(
-                &ffmpeg,
-                &clip,
-                &tracks,
-                previews::ProxyPlatform::current(),
-                &token,
-                publish,
-            )
-            .and_then(|output| {
-                if std::fs::metadata(&output.path)?.len() > settings.preview_cache_bytes {
-                    let _ = std::fs::remove_file(&output.path);
-                    anyhow::bail!("Preview exceeds cache limit; increase it in Settings");
-                }
-                Ok(output)
-            })
-            .map_err(err);
-        let protected = {
-            let mut proxy = state.proxy.lock().map_err(err)?;
-            if proxy
-                .active
-                .as_ref()
-                .is_some_and(|(id, _)| id == &request_id)
-            {
-                proxy.active = None;
-                if let Ok(output) = &result {
-                    proxy.playing = Some(output.path.clone());
-                    proxy.playing_request = Some(request_id.clone());
-                }
-            }
-            proxy.playing.clone().into_iter().collect::<Vec<_>>()
-        };
-        let _ = cache.prune(settings.preview_cache_bytes, &protected);
-        result
-    })
-    .await
-    .map_err(err)?
-}
-#[tauri::command]
-pub async fn clear_preview_cache(app: tauri::AppHandle) -> Reply<()> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+        if state
+            .preview_clearing
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            let _operation = state.active.lock().map_err(err)?;
-            if state
-                .preview_clearing
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-            {
-                return Err("Preview cache is already being cleared".into());
-            }
+            return Err("Thumbnails are already being cleared".into());
         }
         struct Reset<'a>(&'a std::sync::atomic::AtomicBool);
         impl Drop for Reset<'_> {
@@ -340,17 +198,13 @@ pub async fn clear_preview_cache(app: tauri::AppHandle) -> Reply<()> {
         }
         let _reset = Reset(&state.preview_clearing);
         cancel_thumbnails(state.clone())?;
-        cancel_proxy(None, state.clone())?;
         for _ in 0..100 {
-            let idle = state.thumbnails.lock().map_err(err)?.active.is_none()
-                && state.proxy.lock().map_err(err)?.active.is_none();
-            if idle {
-                state.proxy.lock().map_err(err)?.playing = None;
+            if state.thumbnails.lock().map_err(err)?.active.is_none() {
                 return cache(&app).map_err(err)?.clear().map_err(err);
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        Err("Preview workers are stopping; retry clearing the cache".into())
+        Err("Thumbnail workers are stopping; retry shortly".into())
     })
     .await
     .map_err(err)?

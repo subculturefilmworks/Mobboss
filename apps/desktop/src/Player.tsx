@@ -1,19 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import {
+  StreamingPlayer,
+  type StreamStatus,
+  type PlaybackMetrics,
+} from "./streaming";
 import { bytes, filename, timecode, type Clip } from "./model";
-interface PreparationProgress {
-  request_id: string;
-  phase: "reading" | "encoding" | "finalizing" | "loading";
-  fraction: number;
-  seconds: number;
-  duration: number;
-  input_bytes: number;
-  input_files: number;
-  output_bytes?: number | null;
-  eta_seconds?: number | null;
-  speed?: number | null;
-}
 export function clipAudioFiles(clip: Clip) {
   const seen = new Set<string>();
   return clip.files
@@ -48,20 +40,23 @@ export default function Player({
   const [left, setLeft] = useState(0),
     [right, setRight] = useState(audio.length > 1 ? 1 : -1);
   const [attempt, setAttempt] = useState(0),
-    [path, setPath] = useState(""),
     [error, setError] = useState(""),
-    [fraction, setFraction] = useState(0),
     [busy, setBusy] = useState(true),
     [position, setPosition] = useState(0),
-    [length, setLength] = useState(0),
     [playing, setPlaying] = useState(false);
-  const [preparation, setPreparation] = useState<PreparationProgress | null>(
-    null,
-  );
-  const [source, setSource] = useState("");
+  const [preparation, setPreparation] = useState<StreamStatus | null>(null);
   const [encoder, setEncoder] = useState("");
+  const [metrics, setMetrics] = useState<PlaybackMetrics | null>(null);
+  const picture =
+    clip.files.find((f) => f.metadata.track_kind === "video") || clip.files[0];
+  const rate = picture?.metadata.edit_rate;
+  const length =
+    rate && rate.numerator > 0
+      ? (Math.max(0, picture.metadata.duration || 0) * rate.denominator) /
+        rate.numerator
+      : 0;
   const video = useRef<HTMLVideoElement>(null),
-    job = useRef(""),
+    controller = useRef<StreamingPlayer | undefined>(undefined),
     reverse = useRef<number | undefined>(undefined),
     speed = useRef(1);
   const stopReverse = () => {
@@ -71,11 +66,7 @@ export default function Player({
     }
   };
   const seek = (seconds: number) => {
-    const v = video.current;
-    if (v && Number.isFinite(v.duration)) {
-      v.currentTime = Math.max(0, Math.min(v.duration, seconds));
-      setPosition(v.currentTime);
-    }
+    if (controller.current?.seek(seconds)) stopReverse();
   };
   const play = () => {
     stopReverse();
@@ -87,81 +78,34 @@ export default function Player({
     }
   };
   useEffect(() => {
-    let blobUrl: string | undefined;
-    let disposed = false,
-      unlisten: (() => void) | undefined;
-    const requestId = `${Date.now()}-${Math.random()}`;
-    job.current = requestId;
-    setBusy(true);
-    setPlaying(false);
-    setPath("");
-    setSource("");
-    setEncoder("");
     setError("");
-    setFraction(0);
+    setEncoder("");
     setPreparation(null);
+    setMetrics(null);
     setPosition(0);
-    setLength(0);
-    if (uncompressedTitle) {
-      setBusy(false);
-      return;
-    }
-    (async () => {
-      unlisten = await listen<PreparationProgress>(
-        "proxy-progress",
-        ({ payload: p }) => {
-          if (!disposed && p.request_id === requestId) {
-            setFraction(p.fraction);
-            setPreparation(p);
-          }
-        },
-      );
-      if (disposed) {
-        unlisten();
-        return;
-      }
-      const preview = await invoke<{ path: string; encoder: string }>(
-        "prepare_proxy",
-        {
-          clipId: clip.id,
-          tracks: audio.length ? (right >= 0 ? [left, right] : [left]) : [],
-          requestId,
-        },
-      );
-      const path = preview.path;
-      setFraction(1);
-      let source = convertFileSrc(path);
-      // WebKitGTK delegates media fetching to GStreamer, which cannot read Tauri's
-      // custom URI scheme. Fetch from the scoped asset protocol into a browser Blob;
-      // native Blob seeking works. macOS/Windows stream the range-capable asset URL.
-      if (/linux/i.test(navigator.platform)) {
-        if (!disposed)
-          setPreparation((old) => (old ? { ...old, phase: "loading" } : old));
-        const response = await fetch(source);
-        if (!response.ok)
-          throw new Error(`Could not load cached preview (${response.status})`);
-        blobUrl = URL.createObjectURL(await response.blob());
-        source = blobUrl;
-      }
-      if (!disposed) {
-        setSource(source);
-        setEncoder(preview.encoder);
-        setPath(path);
-        setFraction(1);
-        setBusy(false);
-      } else if (blobUrl) URL.revokeObjectURL(blobUrl);
-    })().catch((e) => {
-      if (!disposed) {
-        setError(String(e));
-        setBusy(false);
-      }
-    });
+    setBusy(!uncompressedTitle);
+    if (uncompressedTitle || !video.current) return;
+    const player = new StreamingPlayer(
+      video.current,
+      clip.id,
+      audio.length ? (right >= 0 ? [left, right] : [left]) : [],
+      length,
+      {
+        busy: setBusy,
+        status: setPreparation,
+        encoder: setEncoder,
+        position: setPosition,
+        error: setError,
+        metrics: setMetrics,
+      },
+      frameStep,
+    );
+    controller.current = player;
+    void player.open();
     return () => {
-      disposed = true;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-      unlisten?.();
       stopReverse();
-      invoke("cancel_proxy", { requestId }).catch(() => {});
+      player.dispose();
+      controller.current = undefined;
     };
   }, [clip.id, left, right, attempt]);
   useEffect(() => {
@@ -176,10 +120,10 @@ export default function Player({
       )
         return;
       const v = video.current;
-      if (!v || !path) return;
+      if (!v || !controller.current) return;
 
       if (
-        !["j", "k", "l", " ", "ArrowLeft", "ArrowRight"].includes(
+        !["j", "k", "l", " ", "arrowleft", "arrowright"].includes(
           e.key.toLowerCase(),
         )
       )
@@ -228,7 +172,7 @@ export default function Player({
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [path, clip, onClose]);
+  }, [clip, onClose]);
   return (
     <div className="modal-backdrop">
       <section
@@ -253,17 +197,17 @@ export default function Player({
         </div>
         <video
           ref={video}
-          autoPlay
           playsInline
           preload="metadata"
-          src={source || undefined}
           poster={poster ? convertFileSrc(poster) : undefined}
-          onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setLength(e.currentTarget.duration)}
+          onTimeUpdate={(e) => {
+            if (!busy || e.currentTarget.readyState >= 2)
+              setPosition(e.currentTarget.currentTime);
+          }}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onError={() => {
-            if (path)
+            if (!uncompressedTitle)
               setError(
                 "The webview could not play this preview. Check the platform media codecs.",
               );
@@ -278,7 +222,7 @@ export default function Player({
           <>
             <div className="player-transport">
               <button
-                disabled={!path}
+                disabled={busy}
                 onClick={() => {
                   if (video.current?.paused) play();
                   else {
@@ -296,7 +240,7 @@ export default function Player({
                 max={Number.isFinite(length) ? length : 0}
                 step={frameStep}
                 value={position}
-                disabled={!path}
+                disabled={!length}
                 onChange={(e) => seek(Number(e.target.value))}
               />
               <output>{timecode(clip.metadata, position)}</output>
@@ -343,55 +287,40 @@ export default function Player({
             )}
           </>
         )}
+        {preparation && !busy && (
+          <p className="hint" role="status">
+            Buffered to {preparation.buffered_end.toFixed(1)} s ·{" "}
+            {bytes(preparation.memory_bytes)} in memory
+            {preparation.backpressure ? " · Reading paused (buffer full)" : ""}
+            {metrics
+              ? ` · ${metrics.seek ? "Seek resume" : "First frame"} ${(metrics.firstFrameMs / 1000).toFixed(2)} s`
+              : ""}
+          </p>
+        )}
         {busy && (
           <div className="proxy-progress" role="status">
-            <progress
-              max={1}
-              value={
-                !preparation || preparation.phase === "reading"
-                  ? undefined
-                  : fraction
-              }
-            />
+            <progress />
             <div>
               <strong>
                 {!preparation || preparation.phase === "reading"
                   ? "Reading input headers…"
-                  : preparation.phase === "loading"
-                    ? "Loading cached preview…"
-                    : preparation.phase === "finalizing"
-                      ? "Finalizing preview…"
-                      : `Encoding · ${Math.round(fraction * 100)}%`}
+                  : "Encoding first fragment…"}
               </strong>
               {preparation && (
                 <small>
-                  {preparation.input_files} input
-                  {preparation.input_files === 1 ? "" : "s"} ·{" "}
-                  {bytes(preparation.input_bytes)} source total
-                </small>
-              )}
-              {preparation?.phase === "encoding" && (
-                <small>
-                  {preparation.seconds.toFixed(1)} /{" "}
-                  {preparation.duration.toFixed(1)} s
+                  {preparation.input_files} inputs ·{" "}
+                  {bytes(preparation.input_bytes)} source total ·{" "}
+                  {bytes(preparation.output_bytes)} streamed
+                  {preparation.phase === "encoding"
+                    ? ` · ${preparation.seconds.toFixed(1)} s encoded`
+                    : ""}
                   {preparation.eta_seconds != null
-                    ? ` · ETA ~${Math.ceil(preparation.eta_seconds)} s`
-                    : " · estimating ETA…"}
-                  {preparation.output_bytes != null
-                    ? ` · ${bytes(preparation.output_bytes)} encoded`
+                    ? ` · ETA first fragment ~${Math.ceil(preparation.eta_seconds)} s`
                     : ""}
                 </small>
               )}
             </div>
-            <button
-              onClick={() =>
-                invoke("cancel_proxy", { requestId: job.current }).catch((e) =>
-                  setError(String(e)),
-                )
-              }
-            >
-              Cancel
-            </button>
+            <button onClick={onClose}>Cancel</button>
           </div>
         )}
         {error && (
