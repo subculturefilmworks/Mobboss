@@ -13,6 +13,6 @@ The eight-byte Bento container signature is present. `49 49` indicates little-en
 
 Strings and FourCC-like tokens (`CLSD`, `TKPA`, `TKDA`) support the OMF/Bento interpretation. Finding strings alone cannot establish relationships between filenames, source packages, projects, and tracks. A correct reader needs the container object/property/type tables and Avid's object graph. A reliable MDB inventory parser is deferred rather than guessing associations from neighboring strings.
 
-Phase 1 detects MDB presence, warns that MDB inventory is unsupported, and uses validated PMR entries, the SQLite cache, and MXF headers. An MDB-only directory still triggers auto's quick policy, but every file lacking an indexed header is header-scanned. Missing database entries can be reported from PMR or a previous index; an initial MDB-only scan cannot report entries that exist only in MDB.
+Scanning recognizes MDB presence and reports the validated Bento TOC as information, and uses validated PMR entries, the SQLite cache, and MXF headers. An MDB-only directory still triggers auto's quick policy, but every file lacking an indexed header is header-scanned. Missing database entries can be reported from PMR or a previous index; an initial MDB-only scan cannot report entries that exist only in MDB.
 
 Next steps: independently verify the label layout, absolute offsets and TOC encoding against an OMF/Bento reference implementation, then resolve object properties and compare package IDs against MXF/PMR for the complete sample. No MDB bytes are changed.

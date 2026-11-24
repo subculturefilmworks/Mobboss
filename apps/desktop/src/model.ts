@@ -32,7 +32,24 @@ export interface Diff {
   unlisted: string[];
   changed: string[];
 }
+export interface Reconciliation {
+  root: string;
+  media_files: number;
+  database_files: {
+    path: string;
+    size: number;
+    modified_ns: string;
+    description: string;
+    pmr_missing: number | null;
+    pmr_extra: number | null;
+  }[];
+  other_files: number;
+  other_names: string[];
+  folders: number;
+  total_bytes: number;
+}
 export interface Report {
+  reconciliation?: Reconciliation;
   files: number;
   elapsed_seconds: number;
   warnings: string[];
@@ -57,13 +74,17 @@ export interface Volume {
   total: number;
 }
 export const filename = (path: string) => path.split(/[\\/]/).pop() || path;
-export function bytes(size: number): string {
+export function bytes(
+  size: number,
+  platform = globalThis.navigator?.platform || "",
+): string {
   if (!size) return "0 B";
+  const base = /win/i.test(platform) ? 1024 : 1000;
   const unit = Math.min(
     4,
-    Math.floor(Math.log(Math.max(1, size)) / Math.log(1024)),
+    Math.floor(Math.log(Math.max(1, size)) / Math.log(base)),
   );
-  return `${(size / 1024 ** unit).toLocaleString(undefined, { maximumFractionDigits: unit ? 2 : 0 })} ${["B", "KiB", "MiB", "GiB", "TiB"][unit]}`;
+  return `${(size / base ** unit).toLocaleString(undefined, { maximumFractionDigits: unit ? 2 : 0 })} ${["B", "KB", "MB", "GB", "TB"][unit]}`;
 }
 export const rate = (r?: Rational | null) =>
   r && r.denominator > 0 ? `${r.numerator}/${r.denominator}` : "";
@@ -235,7 +256,7 @@ export function summaryHtml(files: MediaFile[]) {
   )
     .map(
       (p) =>
-        `<tr><td>${escapeHtml(p.name)}</td><td>${p.count}</td><td>${bytes(p.size)}</td></tr>`,
+        `<tr><td>${escapeHtml(p.name)}</td><td>${p.count}</td><td>${bytes(p.size)} (${p.size} bytes)</td></tr>`,
     )
     .join("")}</tbody></table></html>`;
 }

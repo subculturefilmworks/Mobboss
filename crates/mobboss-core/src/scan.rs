@@ -36,7 +36,28 @@ pub struct Diff {
     pub changed: Vec<PathBuf>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Reconciliation {
+    pub root: PathBuf,
+    pub media_files: usize,
+    pub database_files: Vec<DatabaseFile>,
+    pub other_files: usize,
+    pub other_names: Vec<PathBuf>,
+    pub folders: usize,
+    pub total_bytes: u64,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DatabaseFile {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified_ns: String,
+    pub description: String,
+    pub pmr_missing: Option<usize>,
+    pub pmr_extra: Option<usize>,
+}
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ScanReport {
+    #[serde(default)]
+    pub reconciliation: Reconciliation,
     pub files: usize,
     pub headers_read: usize,
     pub cached: usize,
@@ -294,18 +315,73 @@ impl Index {
             .iter()
             .filter_map(|p| p.parent().map(Path::to_path_buf))
             .collect();
-        // Include database-only directories so missing inventories remain visible.
+        let media_trees: Vec<_> = WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_type().is_dir()
+                    && e.file_name().to_str().is_some_and(|n| {
+                        n.eq_ignore_ascii_case("Avid MediaFiles")
+                            || n.eq_ignore_ascii_case("OMFI MediaFiles")
+                    })
+            })
+            .map(|e| e.into_path())
+            .collect();
+        report.reconciliation.root = root.clone();
+        // Count filesystem items independently of successful media header decoding.
         for entry in WalkDir::new(&root)
             .follow_links(false)
             .into_iter()
             .flatten()
         {
             ensure!(!cancel.is_cancelled(), "scan cancelled");
-            if entry.file_type().is_file()
-                && (is_ext(entry.path(), "pmr") || is_ext(entry.path(), "mdb"))
+            let p = entry.path();
+            // A drive can contain unrelated documents and application state. Reconcile only
+            // Avid trees when present; direct arbitrary media-folder scans retain their scope.
+            if !media_trees.is_empty()
+                && !media_trees.iter().any(|tree| p.starts_with(tree))
+                && !disk.contains(&p.to_path_buf())
             {
-                if let Some(p) = entry.path().parent() {
-                    folders.insert(p.to_path_buf());
+                continue;
+            }
+            if entry.file_type().is_dir() {
+                if p != root {
+                    report.reconciliation.folders += 1;
+                }
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let stat = match entry.metadata() {
+                Ok(stat) => stat,
+                Err(e) => {
+                    report.warnings.push(e.to_string());
+                    continue;
+                }
+            };
+            report.reconciliation.total_bytes += stat.len();
+            if is_media(p) {
+                report.reconciliation.media_files += 1;
+            } else if !is_apple_metadata(p) && (is_ext(p, "pmr") || is_ext(p, "mdb")) {
+                if let Some(folder) = p.parent() {
+                    folders.insert(folder.to_path_buf());
+                }
+                report.reconciliation.database_files.push(DatabaseFile {
+                    path: p.to_path_buf(), size: stat.len(), modified_ns: crate::ops::stamp(&stat),
+                    description: if is_ext(p, "mdb") {
+                        "Avid media database (msmMMOB.mdb) — recognized, not needed: Mob Boss reads every MXF header directly"
+                    } else { "Avid file inventory (msmFMID.pmr) — recognized" }.into(),
+                    pmr_missing: None, pmr_extra: None,
+                });
+            } else {
+                report.reconciliation.other_files += 1;
+                if report.reconciliation.other_names.len() < 200 {
+                    report
+                        .reconciliation
+                        .other_names
+                        .push(p.strip_prefix(&root).unwrap_or(p).to_path_buf());
                 }
             }
         }
@@ -319,7 +395,14 @@ impl Index {
         let mut pmr_folders = BTreeSet::new();
         for folder in &folders {
             ensure!(!cancel.is_cancelled(), "scan cancelled");
-            for entry in fs::read_dir(folder)? {
+            let entries = match fs::read_dir(folder) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    report.warnings.push(format!("{}: {e}", folder.display()));
+                    continue;
+                }
+            };
+            for entry in entries {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(e) => {
@@ -328,7 +411,7 @@ impl Index {
                     }
                 };
                 let p = entry.path();
-                if is_ext(&p, "pmr") {
+                if !is_apple_metadata(&p) && is_ext(&p, "pmr") {
                     db_folders.insert(folder.clone());
                     match fs::read(&p)
                         .map_err(anyhow::Error::from)
@@ -345,20 +428,55 @@ impl Index {
                         }
                         Err(e) => report.warnings.push(format!("{}: {e}", p.display())),
                     }
-                } else if is_ext(&p, "mdb") {
+                } else if !is_apple_metadata(&p) && is_ext(&p, "mdb") {
                     db_folders.insert(folder.clone());
-                    let description = match crate::mdb::inspect(&p) {
-                        Ok(info) => format!(
-                            "Bento TOC at {}, {} bytes",
-                            info.toc_offset, info.toc_length
-                        ),
-                        Err(e) => format!("invalid/unsupported container: {e}"),
-                    };
-                    report.warnings.push(format!("{}: {description}; MDB object inventory is unsupported; using PMR, index and headers",p.display()));
+                    match crate::mdb::inspect(&p) {
+                        Ok(info) => {
+                            if let Some(db) = report
+                                .reconciliation
+                                .database_files
+                                .iter_mut()
+                                .find(|db| db.path == p)
+                            {
+                                db.description.push_str(&format!(
+                                    "; Bento TOC: {} bytes at {}",
+                                    info.toc_length, info.toc_offset
+                                ));
+                            }
+                        }
+                        Err(e) => report.warnings.push(format!("{}: {e}", p.display())),
+                    }
                 }
             }
         }
         let listing: BTreeSet<_> = disk.iter().cloned().collect();
+        for folder in &pmr_folders {
+            let expected: BTreeSet<_> = database
+                .keys()
+                .filter(|p| p.parent() == Some(folder.as_path()))
+                .collect();
+            let actual: BTreeSet<_> = listing
+                .iter()
+                .filter(|p| p.parent() == Some(folder.as_path()))
+                .collect();
+            let missing = expected.difference(&actual).count();
+            let extra = actual.difference(&expected).count();
+            for db in report
+                .reconciliation
+                .database_files
+                .iter_mut()
+                .filter(|db| db.path.parent() == Some(folder.as_path()))
+            {
+                db.pmr_missing = Some(missing);
+                db.pmr_extra = Some(extra);
+            }
+            if missing > 0 || extra > 0 {
+                report.warnings.push(format!(
+                    "{}: PMR mismatch: {missing} missing from disk, {extra} extra on disk",
+                    folder.display()
+                ));
+            }
+        }
         let mut expected: BTreeSet<_> = database.keys().cloned().collect();
         expected.extend(
             prior
@@ -558,7 +676,7 @@ fn discover_with_cancel(
     for e in WalkDir::new(root).follow_links(false) {
         ensure!(!cancel.is_cancelled(), "scan cancelled");
         match e {
-            Ok(e) if e.file_type().is_file() && is_ext(e.path(), "mxf") => {
+            Ok(e) if e.file_type().is_file() && is_media(e.path()) => {
                 if e.path().to_str().is_some() {
                     out.push(e.into_path())
                 } else {
@@ -574,4 +692,14 @@ fn discover_with_cancel(
     }
     out.sort();
     Ok(out)
+}
+
+fn is_apple_metadata(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| {
+        let n = n.to_string_lossy();
+        n.starts_with("._") || n == ".DS_Store"
+    })
+}
+fn is_media(p: &Path) -> bool {
+    is_ext(p, "mxf") && !is_apple_metadata(p)
 }

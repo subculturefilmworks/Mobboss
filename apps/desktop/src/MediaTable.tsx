@@ -61,9 +61,13 @@ export default function MediaTable({
               : 150,
         minSize: 75,
         cell: (info) =>
-          key === "size"
-            ? bytes(Number(info.getValue()))
-            : String(info.getValue() || "—"),
+          key === "size" ? (
+            <span title={`${info.getValue()} bytes`}>
+              {bytes(Number(info.getValue()))}
+            </span>
+          ) : (
+            String(info.getValue() || "—")
+          ),
       })),
     [showDiff],
   );

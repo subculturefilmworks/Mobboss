@@ -259,3 +259,75 @@ fn codec_profiles_and_rate_qualified_dnxhd() {
         "DNxHD / DNxHR"
     );
 }
+
+#[test]
+fn reconciliation_counts_hidden_files_databases_and_failed_headers() {
+    let t = Temp::new();
+    let media = t.0.join("drive/Avid MediaFiles/MXF/1");
+    fs::create_dir_all(&media).unwrap();
+    fs::write(t.0.join("drive/unrelated.txt"), b"excluded").unwrap();
+    fs::write(media.join("clip.mxf"), fixture()).unwrap();
+    fs::write(media.join("bad.mxf"), b"bad").unwrap();
+    fs::write(media.join("._clip.mxf"), b"apple").unwrap();
+    fs::write(media.join(".DS_Store"), b"finder").unwrap();
+    let pmr = include_bytes!("../../../tests/fixtures/msmFMID.pmr");
+    fs::write(media.join("msmFMID.pmr"), pmr).unwrap();
+    // Valid minimal Bento label; no invented object count.
+    let mut mdb = vec![
+        0xa4, 0x43, 0x4d, 0xa5, 0x48, 0x64, 0x72, 0xd7, 0, 0, b'I', b'I',
+    ];
+    mdb.resize(24, 0);
+    fs::write(media.join("msmMMOB.mdb"), &mdb).unwrap();
+    let mut index = Index::open_for_scan(&t.0.join("index.sqlite"), &t.0.join("drive")).unwrap();
+    let report = index.scan(&t.0.join("drive"), ScanMode::Deep).unwrap();
+    let r = report.reconciliation;
+    assert_eq!(report.files, 1);
+    assert_eq!(r.media_files, 2);
+    assert_eq!(r.database_files.len(), 2);
+    assert_eq!(r.other_files, 2);
+    assert_eq!(r.folders, 3); // Avid MediaFiles, MXF, 1
+    assert_eq!(
+        r.total_bytes,
+        (fixture().len() + 3 + 5 + 6 + pmr.len() + 24) as u64
+    );
+    assert!(r.other_names.iter().any(|p| p.ends_with("._clip.mxf")));
+    assert!(r
+        .database_files
+        .iter()
+        .all(|db| db.pmr_missing == Some(344) && db.pmr_extra == Some(2)));
+    assert!(report.warnings.iter().any(|w| w.contains("PMR mismatch")));
+    assert!(!report.warnings.iter().any(|w| w.contains("msmMMOB.mdb")));
+}
+
+#[test]
+fn other_file_details_are_capped_without_losing_totals() {
+    let t = Temp::new();
+    let media = t.0.join("media");
+    fs::create_dir(&media).unwrap();
+    for i in 0..205 {
+        fs::write(media.join(format!("other-{i}")), b"x").unwrap();
+    }
+    let mut index = Index::open_for_scan(&t.0.join("index.sqlite"), &media).unwrap();
+    let r = index.scan(&media, ScanMode::Quick).unwrap().reconciliation;
+    assert_eq!(r.other_files, 205);
+    assert_eq!(r.other_names.len(), 200);
+    assert_eq!(r.total_bytes, 205);
+}
+
+#[test]
+fn pmr_agreement_is_information() {
+    let t = Temp::new();
+    let media = t.0.join("media");
+    fs::create_dir(&media).unwrap();
+    let pmr = include_bytes!("../../../tests/fixtures/msmFMID.pmr");
+    let entries = mobboss_core::pmr::parse(pmr).unwrap();
+    for entry in entries {
+        fs::write(media.join(entry.filename), fixture()).unwrap();
+    }
+    fs::write(media.join("msmFMID.pmr"), pmr).unwrap();
+    let mut index = Index::open_for_scan(&t.0.join("index.sqlite"), &media).unwrap();
+    let r = index.scan(&media, ScanMode::Quick).unwrap();
+    assert_eq!(r.reconciliation.database_files[0].pmr_missing, Some(0));
+    assert_eq!(r.reconciliation.database_files[0].pmr_extra, Some(0));
+    assert!(!r.warnings.iter().any(|w| w.contains("PMR mismatch")));
+}

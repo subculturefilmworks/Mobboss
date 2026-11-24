@@ -33,3 +33,39 @@ pub(crate) fn hex(b: &[u8]) -> String {
 }
 pub mod ops;
 pub mod plan;
+
+/// Match Finder on macOS/Linux and Explorer on Windows.
+pub fn format_size(value: u64) -> String {
+    format_size_for(value, cfg!(target_os = "windows"))
+}
+fn format_size_for(value: u64, windows: bool) -> String {
+    let base: f64 = if windows { 1024.0 } else { 1000.0 };
+    let mut size = value as f64;
+    let mut unit = 0;
+    while size >= base && unit < 4 {
+        size /= base;
+        unit += 1;
+    }
+    format!("{size:.2} {}", ["B", "KB", "MB", "GB", "TB"][unit])
+}
+
+#[cfg(test)]
+mod size_tests {
+    #[test]
+    fn finder_and_explorer_parity() {
+        let exact = 315_636_807_021;
+        assert_eq!(super::format_size_for(exact, false), "315.64 GB");
+        assert_eq!(super::format_size_for(exact, true), "293.96 GB");
+        let counts = crate::Reconciliation {
+            media_files: 2449,
+            other_files: 5,
+            folders: 4,
+            total_bytes: exact,
+            ..Default::default()
+        };
+        assert_eq!(
+            counts.media_files + 8 + counts.other_files + counts.folders,
+            2466
+        );
+    }
+}

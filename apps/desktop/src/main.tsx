@@ -341,7 +341,12 @@ function App() {
                 }
               >
                 <span>▱ {v.name || v.path}</span>
-                <small>{bytes(v.available)} free</small>
+                <small>
+                  <span title={`${v.available} bytes`}>
+                    {bytes(v.available)}
+                  </span>{" "}
+                  free
+                </small>
               </button>
             ))}
             {!volumes.length && (
@@ -359,7 +364,10 @@ function App() {
           >
             <span>All projects</span>
             <small>
-              {files.length.toLocaleString()} · {bytes(totalSize(files))}
+              {files.length.toLocaleString()} ·{" "}
+              <span title={`${totalSize(files)} bytes`}>
+                {bytes(totalSize(files))}
+              </span>
             </small>
           </button>
           {summary.map((p) => (
@@ -383,7 +391,8 @@ function App() {
                 {p.name}
               </span>
               <small>
-                {p.count.toLocaleString()} files · {bytes(p.size)}
+                {p.count.toLocaleString()} files ·{" "}
+                <span title={`${p.size} bytes`}>{bytes(p.size)}</span>
               </small>
             </label>
           ))}
@@ -535,13 +544,55 @@ function App() {
             selected={selected}
             setSelected={setSelected}
           />
+          {reports.map((report, i) => {
+            const r = report.reconciliation;
+            return (
+              r && (
+                <details key={i} className="reconciliation">
+                  <summary title={r.root}>
+                    {r.root}: {r.media_files.toLocaleString()} media files ·{" "}
+                    {r.database_files.length} Avid database files (.pmr/.mdb) ·{" "}
+                    {r.other_files} other files · {r.folders} folders — total{" "}
+                    {r.total_bytes.toLocaleString()} bytes
+                  </summary>
+                  {r.database_files.map((db) => (
+                    <p key={db.path}>
+                      {db.path} — {db.description} ·{" "}
+                      <span title={`${db.size} bytes`}>{bytes(db.size)}</span> ·
+                      modified{" "}
+                      {db.modified_ns
+                        ? new Date(
+                            Number(db.modified_ns) / 1e6,
+                          ).toLocaleString()
+                        : "unknown"}
+                      {db.pmr_missing !== null && (
+                        <>
+                          {" "}
+                          · PMR vs MXF:{" "}
+                          {db.pmr_missing === 0 && db.pmr_extra === 0
+                            ? "agree"
+                            : `${db.pmr_missing} missing from disk / ${db.pmr_extra} extra on disk`}
+                        </>
+                      )}
+                    </p>
+                  ))}
+                  <details>
+                    <summary>
+                      Other files ({r.other_files}; showing up to 200)
+                    </summary>
+                    <pre>{r.other_names.join("\n")}</pre>
+                  </details>
+                </details>
+              )
+            );
+          })}
           <div className="notice" role="status">
             {notice}
             {reports.some((r) => r.warnings.length > 0) && (
               <details>
                 <summary>
-                  {reports.reduce((n, r) => n + r.warnings.length, 0)} scan
-                  warning
+                  {reports.reduce((n, r) => n + r.warnings.length, 0)}
+                  {" scan warning"}
                   {reports.reduce((n, r) => n + r.warnings.length, 0) === 1
                     ? ""
                     : "s"}
@@ -560,15 +611,23 @@ function App() {
           <footer>
             <span>
               <b>{files.length.toLocaleString()}</b> files ·{" "}
-              {bytes(totalSize(files))}
+              <span title={`${totalSize(files)} bytes`}>
+                {bytes(totalSize(files))}
+              </span>
             </span>
             <span>
               Filtered <b>{filtered.length.toLocaleString()}</b> ·{" "}
-              {bytes(totalSize(filtered.map((r) => r.file)))}
+              <span title={`${totalSize(filtered.map((r) => r.file))} bytes`}>
+                {bytes(totalSize(filtered.map((r) => r.file)))}
+              </span>
             </span>
             <span className="selected-total">
               Selected <b>{selectedRows.length.toLocaleString()}</b> ·{" "}
-              {bytes(totalSize(selectedRows.map((r) => r.file)))}
+              <span
+                title={`${totalSize(selectedRows.map((r) => r.file))} bytes`}
+              >
+                {bytes(totalSize(selectedRows.map((r) => r.file)))}
+              </span>
             </span>
             {selected.size > 0 && (
               <button onClick={() => setSelected(new Set())}>
