@@ -79,6 +79,105 @@ fn database_only_directory_reports_missing() {
 }
 #[test]
 fn legacy_index_paths_migrate_to_canonical_storage_without_losing_clip_members() {
+    assert_legacy_migration(|path, root| {
+        #[cfg(unix)]
+        let legacy = {
+            let alias = root.join("legacy-system-parent");
+            std::os::unix::fs::symlink(root, &alias).unwrap();
+            alias.join(path.strip_prefix(root).unwrap())
+        };
+        #[cfg(windows)]
+        let legacy = {
+            let _ = root;
+            mobboss_core::paths::display(&mobboss_core::paths::canonical(path).unwrap())
+        };
+        vec![(
+            "legacy selected root".into(),
+            legacy.to_string_lossy().into_owned(),
+            legacy.parent().unwrap().to_string_lossy().into_owned(),
+        )]
+    });
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_legacy_verbatim_short_names_and_mixed_separators_migrate() {
+    assert_legacy_migration(|path, _| {
+        let long = mobboss_core::paths::display(&mobboss_core::paths::canonical(path).unwrap());
+        let short = windows_short_path(&long);
+        eprintln!("Windows migration: long={long:?}, GetShortPathNameW={short:?}");
+        if short == long {
+            eprintln!("This volume has no 8.3 alias; testing the spelling returned by Windows");
+        }
+        let mut variants = Vec::new();
+        for (label, path) in [("long", long), ("8.3", short)] {
+            // Obtain the folder BEFORE introducing mixed verbatim separators.
+            // Windows Path::parent() cannot split that historical string form.
+            let folder = path.parent().unwrap().to_string_lossy().into_owned();
+            for mixed in [false, true] {
+                let legacy = |s: &str| {
+                    let s = s.to_uppercase();
+                    let s = if mixed { s.replace('\\', "/") } else { s };
+                    format!(r"\\?\{s}")
+                };
+                variants.push((
+                    format!("{label}, verbatim, mixed={mixed}"),
+                    legacy(&path.to_string_lossy()),
+                    legacy(&folder),
+                ));
+            }
+        }
+        variants
+    });
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetShortPathNameW(long: *const u16, short: *mut u16, size: u32) -> u32;
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Both pointers remain valid throughout each call; size=0 queries capacity.
+    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    assert_ne!(
+        needed,
+        0,
+        "GetShortPathNameW({path:?}): {}",
+        std::io::Error::last_os_error()
+    );
+    let mut buffer = vec![0u16; needed as usize];
+    let written = unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), needed) };
+    assert!(
+        written > 0 && written < needed,
+        "GetShortPathNameW({path:?}): {}",
+        std::io::Error::last_os_error()
+    );
+    PathBuf::from(std::ffi::OsString::from_wide(&buffer[..written as usize]))
+}
+
+fn migration_keys(db: &Path) -> String {
+    let read = || -> rusqlite::Result<String> {
+        let conn = rusqlite::Connection::open(db)?;
+        let mut result = String::new();
+        for sql in [
+            "SELECT path,folder FROM files ORDER BY path",
+            "SELECT path,clip_id FROM clip_members ORDER BY path",
+            "SELECT root,CAST(id AS TEXT) FROM scan_runs ORDER BY id",
+        ] {
+            let rows = conn
+                .prepare(sql)?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            result.push_str(&format!("\n{sql}: {rows:#?}"));
+        }
+        Ok(result)
+    };
+    read().unwrap_or_else(|e| format!("cannot read stored keys: {e}"))
+}
+
+fn assert_legacy_migration(variants: impl FnOnce(&Path, &Path) -> Vec<(String, String, String)>) {
     let t = Temp::new();
     let media = t.0.join("drive/Avid MediaFiles/MXF/1");
     fs::create_dir_all(&media).unwrap();
@@ -87,43 +186,78 @@ fn legacy_index_paths_migrate_to_canonical_storage_without_losing_clip_members()
     let db = t.0.join("data/index.sqlite");
     let mut index = Index::open(&db).unwrap();
     index.scan(&t.0.join("drive"), ScanMode::Deep).unwrap();
-    let original = index.files(None).unwrap().remove(0);
+    let original = index
+        .files(None)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("scan produced no row: {}", migration_keys(&db)));
     drop(index);
-    #[cfg(unix)]
-    let legacy = {
-        let alias = t.0.join("legacy-system-parent");
-        std::os::unix::fs::symlink(&t.0, &alias).unwrap();
-        alias.join(path.strip_prefix(&t.0).unwrap())
-    };
-    #[cfg(windows)]
-    let legacy = PathBuf::from(format!(
-        r"\\?\{}",
-        path.to_string_lossy().to_uppercase().replace('\\', "/")
-    ));
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.execute("DELETE FROM files", []).unwrap();
-    conn.execute("INSERT INTO files(path,folder,size,modified_ns,project,metadata,present) VALUES(?1,?2,?3,?4,?5,?6,1)", rusqlite::params![legacy.to_string_lossy(), legacy.parent().unwrap().to_string_lossy(),original.size,original.modified_ns,original.metadata.project,serde_json::to_string(&original.metadata).unwrap()]).unwrap();
-    conn.execute_batch("PRAGMA user_version=1").unwrap();
-    drop(conn);
-    let index = Index::open(&db).unwrap();
-    let files = index.files(None).unwrap();
-    assert_eq!(files.len(), 1);
-    assert_eq!(
-        files[0].path,
-        mobboss_core::paths::canonical(&path).unwrap()
-    );
-    assert_eq!(index.clips().unwrap()[0].files.len(), 1);
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    let stored: String = conn
-        .query_row("SELECT path FROM files", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(PathBuf::from(stored), files[0].path);
-    assert_eq!(
-        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
-            .unwrap(),
-        2
-    );
-    assert!(!serde_json::to_string(&files).unwrap().contains(r"\\\\?\\"));
+    for (label, legacy, folder) in variants(&path, &t.0) {
+        for uid in [original.metadata.material_package_uid.clone(), None] {
+            let mut metadata = original.metadata.clone();
+            metadata.material_package_uid = uid;
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM files", []).unwrap();
+            conn.execute("INSERT INTO files(path,folder,size,modified_ns,project,metadata,present) VALUES(?1,?2,?3,?4,?5,?6,1)", rusqlite::params![legacy, folder,original.size,original.modified_ns,metadata.project,serde_json::to_string(&metadata).unwrap()]).unwrap();
+            conn.execute_batch("PRAGMA user_version=1").unwrap();
+            drop(conn);
+            let index = Index::open(&db).unwrap_or_else(|e| {
+                panic!("{label}: migration failed: {e:#}; {}", migration_keys(&db))
+            });
+            let diagnostic = format!(
+                "{label}, material UID={:?}; {}",
+                metadata.material_package_uid,
+                migration_keys(&db)
+            );
+            let files = index
+                .files(None)
+                .unwrap_or_else(|e| panic!("cannot read migrated files: {e:#}; {diagnostic}"));
+            assert_eq!(files.len(), 1, "{diagnostic}");
+            assert_eq!(
+                files[0].path,
+                mobboss_core::paths::canonical(&path).unwrap(),
+                "{diagnostic}"
+            );
+            assert_eq!(
+                files[0].folder,
+                files[0].path.parent().unwrap(),
+                "{diagnostic}"
+            );
+            let clips = index
+                .clips()
+                .unwrap_or_else(|e| panic!("cannot read migrated clips: {e:#}; {diagnostic}"));
+            assert_eq!(clips.len(), 1, "{diagnostic}");
+            assert_eq!(clips[0].files.len(), 1, "{diagnostic}");
+            assert_eq!(clips[0].files[0].path, files[0].path, "{diagnostic}");
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let stored: Vec<(String, String)> = conn
+                .prepare("SELECT path,clip_id FROM clip_members")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                stored,
+                vec![(
+                    files[0].path.to_string_lossy().into_owned(),
+                    mobboss_core::clips::clip_id(&files[0])
+                )],
+                "{diagnostic}"
+            );
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                    .unwrap(),
+                2,
+                "{diagnostic}"
+            );
+            assert!(
+                !serde_json::to_string(&files).unwrap().contains(r"\\\\?\\"),
+                "{diagnostic}"
+            );
+        }
+    }
 }
 #[test]
 fn index_cannot_write_into_media() {
