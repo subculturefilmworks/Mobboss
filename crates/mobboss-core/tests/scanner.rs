@@ -32,6 +32,7 @@ fn incremental_and_corrupt_files() {
     fs::create_dir_all(&media).unwrap();
     let a = media.join("Café 東京.MXF");
     fs::write(&a, fixture()).unwrap();
+    let a = mobboss_core::paths::canonical(&a).unwrap();
     let mut index = Index::open_for_scan(&t.0.join("index.sqlite"), &media).unwrap();
     let r = index.scan(&t.0.join("workspace"), ScanMode::Auto).unwrap();
     assert_eq!((r.files, r.headers_read), (1, 1));
@@ -75,6 +76,54 @@ fn database_only_directory_reports_missing() {
     let mut i = Index::open_for_scan(&t.0.join("index.sqlite"), &media).unwrap();
     let r = i.scan(&media, ScanMode::Quick).unwrap();
     assert_eq!(r.diff.missing.len(), 344);
+}
+#[test]
+fn legacy_index_paths_migrate_to_canonical_storage_without_losing_clip_members() {
+    let t = Temp::new();
+    let media = t.0.join("drive/Avid MediaFiles/MXF/1");
+    fs::create_dir_all(&media).unwrap();
+    let path = media.join("a.mxf");
+    fs::write(&path, fixture()).unwrap();
+    let db = t.0.join("data/index.sqlite");
+    let mut index = Index::open(&db).unwrap();
+    index.scan(&t.0.join("drive"), ScanMode::Deep).unwrap();
+    let original = index.files(None).unwrap().remove(0);
+    drop(index);
+    #[cfg(unix)]
+    let legacy = {
+        let alias = t.0.join("legacy-system-parent");
+        std::os::unix::fs::symlink(&t.0, &alias).unwrap();
+        alias.join(path.strip_prefix(&t.0).unwrap())
+    };
+    #[cfg(windows)]
+    let legacy = PathBuf::from(format!(
+        r"\\?\{}",
+        path.to_string_lossy().to_uppercase().replace('\\', "/")
+    ));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM files", []).unwrap();
+    conn.execute("INSERT INTO files(path,folder,size,modified_ns,project,metadata,present) VALUES(?1,?2,?3,?4,?5,?6,1)", rusqlite::params![legacy.to_string_lossy(), legacy.parent().unwrap().to_string_lossy(),original.size,original.modified_ns,original.metadata.project,serde_json::to_string(&original.metadata).unwrap()]).unwrap();
+    conn.execute_batch("PRAGMA user_version=1").unwrap();
+    drop(conn);
+    let index = Index::open(&db).unwrap();
+    let files = index.files(None).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0].path,
+        mobboss_core::paths::canonical(&path).unwrap()
+    );
+    assert_eq!(index.clips().unwrap()[0].files.len(), 1);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let stored: String = conn
+        .query_row("SELECT path FROM files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(PathBuf::from(stored), files[0].path);
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        2
+    );
+    assert!(!serde_json::to_string(&files).unwrap().contains(r"\\\\?\\"));
 }
 #[test]
 fn index_cannot_write_into_media() {

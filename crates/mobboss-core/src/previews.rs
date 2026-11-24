@@ -361,7 +361,7 @@ impl PreviewCache {
         let root = crate::validate_destination(root)?;
         fs::create_dir_all(&root)?;
         let cache = Self {
-            root: root.canonicalize()?,
+            root: crate::paths::canonical(&root)?,
         };
         cache.cleanup_partials()?;
         Ok(cache)
@@ -523,6 +523,7 @@ pub struct ThumbnailProgress {
     pub done: usize,
     pub total: usize,
     pub clip_id: String,
+    #[serde(serialize_with = "crate::paths::serialize_optional")]
     pub path: Option<PathBuf>,
     pub error: Option<String>,
     pub cancelled: bool,

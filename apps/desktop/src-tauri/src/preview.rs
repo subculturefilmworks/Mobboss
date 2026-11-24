@@ -41,6 +41,7 @@ pub fn ffmpeg(app: &tauri::AppHandle) -> Option<Ffmpeg> {
 pub struct PreviewStatus {
     available: bool,
     message: String,
+    #[serde(serialize_with = "mobboss_core::paths::serialize_map")]
     thumbnails: BTreeMap<String, PathBuf>,
     thumbnail_bytes: u64,
 }

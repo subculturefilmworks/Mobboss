@@ -130,7 +130,12 @@ fn main() -> Result<()> {
             if a.yes && !preview {
                 let data = default_index()?.parent().unwrap().to_path_buf();
                 let result = mobboss_core::ops::execute(&mut index, &plan, &data, &cancel, |p| {
-                    eprintln!("{} / {}  {}", p.done, p.total, p.source.display())
+                    eprintln!(
+                        "{} / {}  {}",
+                        p.done,
+                        p.total,
+                        mobboss_core::paths::display(&p.source).display()
+                    )
                 })?;
                 if a.json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -202,7 +207,7 @@ fn main() -> Result<()> {
             for db in &c.database_files {
                 println!(
                     "{}: {}; {}; modified ns {}",
-                    db.path.display(),
+                    mobboss_core::paths::display(&db.path).display(),
                     db.description,
                     display_bytes(db.size),
                     db.modified_ns
@@ -219,7 +224,7 @@ fn main() -> Result<()> {
                 }
             }
             for name in &c.other_names {
-                println!("Other: {}", name.display());
+                println!("Other: {}", mobboss_core::paths::display(name).display());
             }
             for (p, n) in r.projects {
                 println!("{p}: {n}");
@@ -251,7 +256,9 @@ fn main() -> Result<()> {
                 for f in files {
                     let m = f.metadata;
                     w.write_record([
-                        f.path.to_string_lossy().into_owned(),
+                        mobboss_core::paths::display(&f.path)
+                            .to_string_lossy()
+                            .into_owned(),
                         m.project.unwrap_or_default(),
                         m.clip_name.unwrap_or_default(),
                         m.track_kind.unwrap_or_default(),
@@ -270,7 +277,7 @@ fn main() -> Result<()> {
                         "{}\t{}\t{}",
                         f.metadata.project.as_deref().unwrap_or("Unknown"),
                         f.metadata.codec.as_deref().unwrap_or("Unknown"),
-                        f.path.display()
+                        mobboss_core::paths::display(&f.path).display()
                     );
                 }
             }
@@ -296,7 +303,7 @@ fn drive_summary(drives: &[mobboss_core::plan::DriveSummary]) -> String {
         let _ = writeln!(
             text,
             "{}\n  {} files · {}\n  Free: {}\n  Required with margin: {}{}",
-            drive.root.display(),
+            mobboss_core::paths::display(&drive.root).display(),
             drive.files,
             display_bytes(drive.bytes),
             display_bytes(drive.available),
@@ -356,10 +363,16 @@ fn outcome_summary(result: &mobboss_core::ops::Outcome) -> String {
         text.push_str(&format!("Warning: {warning}\n"));
     }
     for folder in &result.touched {
-        text.push_str(&format!("Touched: {}\n", folder.display()));
+        text.push_str(&format!(
+            "Touched: {}\n",
+            mobboss_core::paths::display(folder).display()
+        ));
     }
     for log in &result.logs {
-        text.push_str(&format!("Log: {}\n", log.display()));
+        text.push_str(&format!(
+            "Log: {}\n",
+            mobboss_core::paths::display(log).display()
+        ));
     }
     text
 }

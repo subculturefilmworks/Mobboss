@@ -13,7 +13,7 @@ pub(crate) struct AppState {
 }
 pub(crate) type Reply<T> = Result<T, String>;
 pub(crate) fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
+    mobboss_core::paths::message(&e.to_string())
 }
 #[tauri::command]
 fn settings(state: State<AppState>) -> Reply<Settings> {
@@ -29,7 +29,7 @@ fn save_settings(mut value: Settings, state: State<AppState>) -> Reply<Settings>
     value.roots = value
         .roots
         .into_iter()
-        .map(|p| p.canonicalize().unwrap_or(p))
+        .map(|p| mobboss_core::paths::selected(&p).unwrap_or(p))
         .collect();
     value.save().map_err(err)?;
     *state.settings.lock().map_err(err)? = value.clone();

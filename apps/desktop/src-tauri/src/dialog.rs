@@ -54,7 +54,13 @@ pub async fn pick_path(
             .map(|paths| {
                 paths
                     .into_iter()
-                    .map(|p| p.into_path().map_err(err))
+                    .map(|p| {
+                        p.into_path().map_err(err).and_then(|p| {
+                            mobboss_core::paths::selected(&p)
+                                .map(|p| mobboss_core::paths::display(&p))
+                                .map_err(err)
+                        })
+                    })
                     .collect()
             })
             .transpose()

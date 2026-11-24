@@ -23,7 +23,9 @@ pub enum ScanMode {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFile {
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub path: PathBuf,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub folder: PathBuf,
     pub size: u64,
     pub modified_ns: String,
@@ -31,22 +33,28 @@ pub struct MediaFile {
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Diff {
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub missing: Vec<PathBuf>,
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub unlisted: Vec<PathBuf>,
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub changed: Vec<PathBuf>,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Reconciliation {
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub root: PathBuf,
     pub media_files: usize,
     pub database_files: Vec<DatabaseFile>,
     pub other_files: usize,
+    #[serde(serialize_with = "crate::paths::serialize_many")]
     pub other_names: Vec<PathBuf>,
     pub folders: usize,
     pub total_bytes: u64,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DatabaseFile {
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub path: PathBuf,
     pub size: u64,
     pub modified_ns: String,
@@ -103,6 +111,7 @@ pub struct ScanProgress {
     pub phase: ScanPhase,
     pub done: usize,
     pub total: usize,
+    #[serde(serialize_with = "crate::paths::serialize")]
     pub current_folder: PathBuf,
     /// Inventory rows are provisional; enrichment rows are verified by MXF headers.
     pub files: Vec<MediaFile>,
@@ -112,42 +121,15 @@ pub struct Index {
     path: PathBuf,
 }
 pub fn default_index() -> Result<PathBuf> {
-    Ok(ProjectDirs::from("org", "MobBoss", "MobBoss")
-        .context("no app data directory")?
-        .data_local_dir()
-        .join("index.sqlite"))
+    crate::paths::canonical(
+        &ProjectDirs::from("org", "MobBoss", "MobBoss")
+            .context("no app data directory")?
+            .data_local_dir()
+            .join("index.sqlite"),
+    )
 }
 fn canonical_destination(path: &Path) -> Result<PathBuf> {
-    ensure!(
-        !path
-            .components()
-            .any(|c| c == std::path::Component::ParentDir),
-        "destination cannot contain parent traversal (..) components"
-    );
-    if path.exists() {
-        return Ok(path.canonicalize()?);
-    }
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut ancestor = absolute.as_path();
-    let mut tail = Vec::new();
-    while !ancestor.exists() {
-        tail.push(
-            ancestor
-                .file_name()
-                .context("invalid index path")?
-                .to_owned(),
-        );
-        ancestor = ancestor.parent().context("invalid index parent")?;
-    }
-    let mut dest = ancestor.canonicalize()?;
-    for part in tail.iter().rev() {
-        dest.push(part)
-    }
-    Ok(dest)
+    crate::paths::canonical(path)
 }
 /// Canonicalize and reject destinations in known media directories before any writes.
 pub fn validate_destination(path: &Path) -> Result<PathBuf> {
@@ -174,13 +156,19 @@ pub fn validate_destination(path: &Path) -> Result<PathBuf> {
     }
     Ok(path)
 }
+// Keep fallback clip IDs identical to the prefix-free path serialized to the UI.
+fn clip_expression(path: &str, metadata: &str) -> String {
+    format!(
+        r"CASE WHEN length(json_extract({metadata},'$.material_package_uid'))>0 THEN 'uid:'||json_extract({metadata},'$.material_package_uid') ELSE 'file:'||CASE WHEN substr({path},1,8)='\\?\UNC\' THEN '\\'||substr({path},9) WHEN substr({path},1,4)='\\?\' THEN substr({path},5) ELSE {path} END END"
+    )
+}
 impl Index {
     /// Validate the complete destination before any SQLite or directory writes.
     pub fn open_for_scan(path: &Path, root: &Path) -> Result<Self> {
-        let root = root.canonicalize()?;
+        let root = crate::paths::selected(root)?;
         let dest = canonical_destination(path)?;
         ensure!(
-            !dest.starts_with(&root) || root.parent().is_none(),
+            !crate::paths::contains(&dest, &root) || root.parent().is_none(),
             "index must be outside the scanned media tree"
         );
         Self::open(&dest)
@@ -204,7 +192,100 @@ impl Index {
             CREATE TRIGGER IF NOT EXISTS clip_delete AFTER DELETE ON files BEGIN DELETE FROM clip_members WHERE path=OLD.path; END;
             PRAGMA user_version=1;")?;
         }
-        Ok(Self { conn, path })
+        let mut index = Self { conn, path };
+        index.normalize_stored_paths()?;
+        Ok(index)
+    }
+    fn normalize_stored_paths(&mut self) -> Result<()> {
+        if self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))?
+            >= 2
+        {
+            return Ok(());
+        }
+        let rows = {
+            let mut q = self.conn.prepare(
+                "SELECT path,folder,size,modified_ns,project,metadata,present FROM files",
+            )?;
+            let rows = q.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, bool>(6)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let roots = rows
+            .iter()
+            .map(|r| self.source_root(Path::new(&r.0)))
+            .collect::<Result<Vec<_>>>()?;
+        let tx = self.conn.transaction()?;
+        for ((old, _folder, size, modified, project, metadata, present), source_root) in
+            rows.into_iter().zip(roots)
+        {
+            // Leave unsafe/disconnected rows alone; operations still validate them.
+            let Ok(path) = crate::paths::from_selected_root(Path::new(&old), &source_root) else {
+                continue;
+            };
+            let folder = path.parent().context("no file parent")?;
+            if path.as_os_str() != std::ffi::OsStr::new(&old) {
+                tx.execute("INSERT INTO files(path,folder,size,modified_ns,project,metadata,present) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(path) DO UPDATE SET present=max(files.present,excluded.present)", params![path.to_string_lossy(),folder.to_string_lossy(),size,modified,project,metadata,present])?;
+                tx.execute("DELETE FROM files WHERE path=?1", [&old])?;
+            } else {
+                tx.execute(
+                    "UPDATE files SET folder=?1 WHERE path=?2",
+                    params![folder.to_string_lossy(), old],
+                )?;
+            }
+        }
+        tx.execute("DELETE FROM folders", [])?;
+        tx.execute("INSERT INTO folders SELECT DISTINCT folder FROM files", [])?;
+        let roots = {
+            let mut q = tx.prepare("SELECT id,root FROM scan_runs")?;
+            let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (id, root) in roots {
+            if let Ok(root) = crate::paths::canonical(Path::new(&root)) {
+                tx.execute(
+                    "UPDATE scan_runs SET root=?1 WHERE id=?2",
+                    params![root.to_string_lossy(), id],
+                )?;
+            }
+        }
+        let current = clip_expression("path", "metadata");
+        let inserted = clip_expression("NEW.path", "NEW.metadata");
+        tx.execute_batch(&format!("DROP TRIGGER IF EXISTS clip_insert; DROP TRIGGER IF EXISTS clip_update;
+            INSERT OR REPLACE INTO clip_members SELECT path,{current} FROM files;
+            CREATE TRIGGER clip_insert AFTER INSERT ON files BEGIN INSERT OR REPLACE INTO clip_members VALUES(NEW.path,{inserted}); END;
+            CREATE TRIGGER clip_update AFTER UPDATE OF metadata ON files BEGIN UPDATE clip_members SET clip_id={inserted} WHERE path=NEW.path; END;
+            PRAGMA user_version=2;"))?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn source_root(&self, path: &Path) -> Result<PathBuf> {
+        let path = crate::paths::native(path);
+        let path = path.as_path();
+        let mut q = self.conn.prepare("SELECT DISTINCT root FROM scan_runs")?;
+        let roots = q
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(roots
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|r| crate::paths::contains(path, r))
+            .max_by_key(|p| p.components().count())
+            .unwrap_or_else(|| {
+                crate::paths::tree_root(path)
+                    .unwrap_or_else(|| path.parent().unwrap_or(path))
+                    .to_path_buf()
+            }))
     }
     pub fn clips(&self) -> Result<Vec<crate::clips::Clip>> {
         Ok(crate::clips::group(self.files(None)?))
@@ -255,7 +336,9 @@ impl Index {
         dest: &Path,
         moved: bool,
     ) -> Result<()> {
-        let stat = fs::metadata(dest)?;
+        let dest = crate::paths::media(dest)?;
+        let source = crate::paths::canonical(source)?;
+        let stat = fs::metadata(&dest)?;
         let folder = dest.parent().context("no destination parent")?;
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -273,6 +356,7 @@ impl Index {
         Ok(())
     }
     pub fn forget_path(&mut self, path: &Path) -> Result<()> {
+        let path = crate::paths::canonical(path)?;
         self.conn
             .execute("DELETE FROM files WHERE path=?1", [path.to_string_lossy()])?;
         Ok(())
@@ -310,6 +394,7 @@ impl Index {
         let mode = options.mode;
         let started = Instant::now();
         ensure!(!cancel.is_cancelled(), "scan cancelled");
+        let root = crate::paths::selected(root)?;
         progress(ScanProgress {
             phase: ScanPhase::Discovery,
             done: 0,
@@ -317,17 +402,19 @@ impl Index {
             current_folder: root.to_path_buf(),
             files: vec![],
         });
-        let root = root.canonicalize()?;
         ensure!(root.is_dir(), "scan root must be a directory");
         ensure!(
-            !self.path.starts_with(&root) || root.parent().is_none(),
+            !crate::paths::contains(&self.path, &root) || root.parent().is_none(),
             "index must be outside the scanned media tree"
         );
         let mut report = ScanReport::default();
         let disk = discover_with_cancel(&root, &mut report.warnings, cancel)?;
         let mut folders: BTreeSet<_> = disk
             .iter()
-            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .filter_map(|p| {
+                p.parent()
+                    .map(|p| crate::paths::storage(p).unwrap_or_else(|_| p.to_path_buf()))
+            })
             .collect();
         let media_trees: Vec<_> = WalkDir::new(&root)
             .follow_links(false)
@@ -350,11 +437,17 @@ impl Index {
             .flatten()
         {
             ensure!(!cancel.is_cancelled(), "scan cancelled");
-            let p = entry.path();
+            if entry.file_type().is_symlink() {
+                continue;
+            }
+            let canonical_entry = crate::paths::storage(entry.path())?;
+            let p = canonical_entry.as_path();
             // A drive can contain unrelated documents and application state. Reconcile only
             // Avid trees when present; direct arbitrary media-folder scans retain their scope.
             if !media_trees.is_empty()
-                && !media_trees.iter().any(|tree| p.starts_with(tree))
+                && !media_trees
+                    .iter()
+                    .any(|tree| crate::paths::contains(p, tree))
                 && !disk.contains(&p.to_path_buf())
             {
                 continue;
@@ -412,7 +505,9 @@ impl Index {
             let entries = match fs::read_dir(folder) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    report.warnings.push(format!("{}: {e}", folder.display()));
+                    report
+                        .warnings
+                        .push(format!("{}: {e}", crate::paths::display(folder).display()));
                     continue;
                 }
             };
@@ -424,7 +519,10 @@ impl Index {
                         continue;
                     }
                 };
-                let p = entry.path();
+                if entry.file_type()?.is_symlink() {
+                    continue;
+                }
+                let p = crate::paths::storage(&entry.path())?;
                 if !is_apple_metadata(&p) && is_ext(&p, "pmr") {
                     db_folders.insert(folder.clone());
                     match fs::read(&p)
@@ -436,11 +534,13 @@ impl Index {
                             for e in entries {
                                 let name = Path::new(&e.filename);
                                 if name.components().count() == 1 {
-                                    database.insert(folder.join(name), e);
+                                    database.insert(crate::paths::storage(&folder.join(name))?, e);
                                 }
                             }
                         }
-                        Err(e) => report.warnings.push(format!("{}: {e}", p.display())),
+                        Err(e) => report
+                            .warnings
+                            .push(format!("{}: {e}", crate::paths::display(&p).display())),
                     }
                 } else if !is_apple_metadata(&p) && is_ext(&p, "mdb") {
                     db_folders.insert(folder.clone());
@@ -458,7 +558,9 @@ impl Index {
                                 ));
                             }
                         }
-                        Err(e) => report.warnings.push(format!("{}: {e}", p.display())),
+                        Err(e) => report
+                            .warnings
+                            .push(format!("{}: {e}", crate::paths::display(&p).display())),
                     }
                 }
             }
@@ -467,11 +569,11 @@ impl Index {
         for folder in &pmr_folders {
             let expected: BTreeSet<_> = database
                 .keys()
-                .filter(|p| p.parent() == Some(folder.as_path()))
+                .filter(|p| p.parent().is_some_and(|p| crate::paths::same(p, folder)))
                 .collect();
             let actual: BTreeSet<_> = listing
                 .iter()
-                .filter(|p| p.parent() == Some(folder.as_path()))
+                .filter(|p| p.parent().is_some_and(|p| crate::paths::same(p, folder)))
                 .collect();
             let missing = expected.difference(&actual).count();
             let extra = actual.difference(&expected).count();
@@ -479,7 +581,11 @@ impl Index {
                 .reconciliation
                 .database_files
                 .iter_mut()
-                .filter(|db| db.path.parent() == Some(folder.as_path()))
+                .filter(|db| {
+                    db.path
+                        .parent()
+                        .is_some_and(|p| crate::paths::same(p, folder))
+                })
             {
                 db.pmr_missing = Some(missing);
                 db.pmr_extra = Some(extra);
@@ -487,7 +593,7 @@ impl Index {
             if missing > 0 || extra > 0 {
                 report.warnings.push(format!(
                     "{}: PMR mismatch: {missing} missing from disk, {extra} extra on disk",
-                    folder.display()
+                    crate::paths::display(folder).display()
                 ));
             }
         }
@@ -496,12 +602,29 @@ impl Index {
             prior
                 .keys()
                 .filter(|p| {
-                    p.starts_with(&root) && !p.parent().is_some_and(|f| pmr_folders.contains(f))
+                    crate::paths::contains(p, &root)
+                        && !p.parent().is_some_and(|f| pmr_folders.contains(f))
                 })
                 .cloned(),
         );
-        report.diff.missing = expected.difference(&listing).cloned().collect();
-        report.diff.unlisted = listing.difference(&expected).cloned().collect();
+        let expected: BTreeMap<_, _> = expected
+            .into_iter()
+            .map(|p| (crate::paths::key(&p), p))
+            .collect();
+        let listing: BTreeMap<_, _> = listing
+            .into_iter()
+            .map(|p| (crate::paths::key(&p), p))
+            .collect();
+        report.diff.missing = expected
+            .iter()
+            .filter(|(key, _)| !listing.contains_key(*key))
+            .map(|(_, p)| p.clone())
+            .collect();
+        report.diff.unlisted = listing
+            .iter()
+            .filter(|(key, _)| !expected.contains_key(*key))
+            .map(|(_, p)| p.clone())
+            .collect();
         let mut records = Vec::new();
         let mut jobs = Vec::new();
         let mut inventory = Vec::new();
@@ -510,7 +633,9 @@ impl Index {
             let stat = match fs::metadata(&path) {
                 Ok(s) => s,
                 Err(e) => {
-                    report.warnings.push(format!("{}: {e}", path.display()));
+                    report
+                        .warnings
+                        .push(format!("{}: {e}", crate::paths::display(&path).display()));
                     continue;
                 }
             };
@@ -601,7 +726,7 @@ impl Index {
                             if metadata.project.as_deref() != Some(e.project.as_str()) {
                                 report.warnings.push(format!(
                                     "{}: PMR project differs from MXF header",
-                                    file.path.display()
+                                    crate::paths::display(&file.path).display()
                                 ));
                             }
                         }
@@ -609,9 +734,10 @@ impl Index {
                         update.push(file.clone());
                         records.push(file.clone());
                     }
-                    Err(e) => report
-                        .warnings
-                        .push(format!("{}: {e:#}", file.path.display())),
+                    Err(e) => report.warnings.push(format!(
+                        "{}: {e:#}",
+                        crate::paths::display(&file.path).display()
+                    )),
                 }
                 progress(ScanProgress {
                     phase: ScanPhase::Enrichment,
@@ -637,9 +763,14 @@ impl Index {
         }
         report.files = records.len();
         report.elapsed_seconds = started.elapsed().as_secs_f64();
+        report.warnings = report
+            .warnings
+            .into_iter()
+            .map(|m| crate::paths::message(&m))
+            .collect();
         let tx = self.conn.transaction()?;
         // Only mark rows in this exact discovered scope absent; path prefix matching is component-aware.
-        for path in prior.keys().filter(|p| p.starts_with(&root)) {
+        for path in prior.keys().filter(|p| crate::paths::contains(p, &root)) {
             tx.execute(
                 "UPDATE files SET present=0 WHERE path=?1",
                 [path.to_string_lossy().as_ref()],
@@ -695,7 +826,7 @@ fn discover_with_cancel(
         match e {
             Ok(e) if e.file_type().is_file() && is_media(e.path()) => {
                 if e.path().to_str().is_some() {
-                    out.push(e.into_path())
+                    out.push(crate::paths::storage(e.path())?)
                 } else {
                     warnings.push(format!(
                         "{}: non-UTF-8 path cannot be indexed",
@@ -719,4 +850,22 @@ fn is_apple_metadata(p: &Path) -> bool {
 }
 fn is_media(p: &Path) -> bool {
     is_ext(p, "mxf") && !is_apple_metadata(p)
+}
+
+#[cfg(test)]
+mod path_storage_tests {
+    #[test]
+    fn persisted_fallback_clip_ids_use_the_same_public_path_spelling() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for (path, expected) in [
+            (r"\\?\C:\Sample Drive\a.mxf", r"file:C:\Sample Drive\a.mxf"),
+            (r"\\?\UNC\server\share\a.mxf", r"file:\\server\share\a.mxf"),
+        ] {
+            let sql = format!("SELECT {}", super::clip_expression("?1", "?2"));
+            let id: String = conn
+                .query_row(&sql, rusqlite::params![path, "{}"], |r| r.get(0))
+                .unwrap();
+            assert_eq!(id, expected);
+        }
+    }
 }
