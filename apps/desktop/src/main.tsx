@@ -8,7 +8,7 @@ import React, {
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "./Dialog";
 import MediaTable, { useStored } from "./MediaTable";
 import {
   bytes,
@@ -29,6 +29,7 @@ import {
 } from "./model";
 import "./style.css";
 import Operations from "./Operations";
+import { usePreviews } from "./Previews";
 import ClipTable from "./ClipTable";
 import { groupClips } from "./model";
 const desktop = "__TAURI_INTERNALS__" in window;
@@ -42,6 +43,7 @@ const emptyFilters: Filters = {
 };
 function App() {
   const [files, setFiles] = useState<MediaFile[]>([]);
+  const previews = usePreviews(desktop, files);
   const [archived, setArchived] = useState<MediaFile[]>([]);
   const [settings, setSettings] = useState<Settings>({
     index: "",
@@ -561,9 +563,39 @@ function App() {
             >
               Clips
             </button>
+            <button
+              aria-pressed={view === "grid"}
+              onClick={() => setView("grid")}
+            >
+              Grid
+            </button>
           </div>
-          {view === "clips" ? (
+          <div className="preview-status" role="status">
+            <span>
+              {previews.running
+                ? `Thumbnails ${previews.progress?.done || 0} / ${previews.progress?.total || clips.length}`
+                : previews.status.message}
+              {Object.keys(previews.errors).length > 0
+                ? ` · ${Object.keys(previews.errors).length} failed (retry available)`
+                : ""}
+            </span>
+            {previews.running ? (
+              <button onClick={() => run(previews.cancel)}>
+                Cancel thumbnails
+              </button>
+            ) : (
+              previews.status.available && (
+                <button disabled={busy} onClick={() => run(previews.retry)}>
+                  Generate / retry thumbnails
+                </button>
+              )
+            )}
+          </div>
+          {view !== "files" ? (
             <ClipTable
+              thumbnailErrors={previews.errors}
+              thumbnails={previews.status.thumbnails}
+              grid={view === "grid"}
               clips={clips}
               selected={selected}
               setSelected={setSelected}

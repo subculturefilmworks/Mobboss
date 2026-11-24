@@ -8,7 +8,9 @@
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist",
-    "features": ["desktop"]
+    "features": [
+      "desktop"
+    ]
   },
   "app": {
     "windows": [
@@ -21,12 +23,19 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost; connect-src ipc: http://ipc.localhost asset: http://asset.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -34,6 +43,8 @@
       "icons/icon.ico"
     ],
     "license": "MIT OR Apache-2.0",
-    "macOS": { "minimumSystemVersion": "10.15" }
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
   }
 }

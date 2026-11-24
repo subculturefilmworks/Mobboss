@@ -2,14 +2,15 @@ use crate::service::{self, Settings};
 use mobboss_core::{CancellationToken, ScanMode, ScanOptions};
 use std::{path::PathBuf, sync::Mutex};
 use tauri::{Emitter, Manager, State};
-struct AppState {
-    settings: Mutex<Settings>,
-    active: Mutex<Option<CancellationToken>>,
+pub(crate) struct AppState {
+    pub(crate) settings: Mutex<Settings>,
+    pub(crate) active: Mutex<Option<CancellationToken>>,
+    pub(crate) thumbnails: Mutex<Option<CancellationToken>>,
     planned: Mutex<Option<mobboss_core::plan::Plan>>,
     undo_log: Mutex<Option<PathBuf>>,
 }
-type Reply<T> = Result<T, String>;
-fn err(e: impl std::fmt::Display) -> String {
+pub(crate) type Reply<T> = Result<T, String>;
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 #[tauri::command]
@@ -60,6 +61,7 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
     if active.is_some() {
         return Err("A scan is already running".into());
     }
+    crate::preview::cancel_thumbnails(state.clone())?;
     let settings = state.settings.lock().map_err(err)?.clone();
     let token = CancellationToken::default();
     *active = Some(token.clone());
@@ -80,6 +82,9 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
             *active = None;
         }
         let _ = app.emit("scan-finished", &result);
+        if result.is_ok() && !token.is_cancelled() {
+            let _ = crate::preview::start_thumbnails(app.clone(), app.state::<AppState>());
+        }
     });
     Ok(())
 }
@@ -234,15 +239,23 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let cache = crate::preview::cache(app.handle())?;
+            app.asset_protocol_scope()
+                .allow_directory(&cache.root, true)?;
             app.manage(AppState {
                 settings: Mutex::new(Settings::load()?),
                 active: Mutex::new(None),
+                thumbnails: Mutex::new(None),
                 planned: Mutex::new(None),
                 undo_log: Mutex::new(None),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            crate::dialog::pick_path,
+            crate::preview::preview_status,
+            crate::preview::start_thumbnails,
+            crate::preview::cancel_thumbnails,
             settings,
             save_settings,
             files,

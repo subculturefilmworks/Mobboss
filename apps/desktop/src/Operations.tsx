@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open } from "./Dialog";
 import { bytes, requiresDestination, type MediaFile } from "./model";
 type Op = "move" | "copy" | "collect";
 interface Action {

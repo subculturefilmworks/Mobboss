@@ -1,3 +1,4 @@
+import { Poster } from "./Previews";
 import { Fragment, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -13,8 +14,14 @@ export default function ClipTable({
   clips,
   selected,
   setSelected,
+  thumbnails = {},
+  thumbnailErrors = {},
+  grid = false,
 }: {
   clips: Clip[];
+  thumbnails?: Record<string, string>;
+  thumbnailErrors?: Record<string, string>;
+  grid?: boolean;
   selected: Set<string>;
   setSelected: (s: Set<string>) => void;
 }) {
@@ -35,6 +42,55 @@ export default function ClipTable({
   const all =
     clips.length > 0 &&
     clips.every((c) => c.files.every((f) => selected.has(f.path)));
+  if (grid)
+    return (
+      <section className="table-section">
+        <div className="table-tools">
+          {clips.length.toLocaleString()} matching clips
+        </div>
+        <div className="clip-grid">
+          {clips.map((clip) => (
+            <article
+              tabIndex={0}
+              key={clip.id}
+              className={`clip-card ${clip.files.every((f) => selected.has(f.path)) ? "selected" : ""}`}
+              onClick={(e) =>
+                setSelected(selectClip(selected, clip, e.ctrlKey || e.metaKey))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSelected(selectClip(selected, clip));
+                }
+              }}
+            >
+              <Poster
+                path={thumbnails[clip.id]}
+                name={clip.name}
+                error={thumbnailErrors[clip.id]}
+              />
+              <div>
+                <label onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${clip.name}`}
+                    checked={clip.files.every((f) => selected.has(f.path))}
+                    onChange={() => setSelected(selectClip(selected, clip))}
+                  />
+                  <b title={clip.name}>{clip.name}</b>
+                </label>
+                <small>{clip.metadata.project || "Unknown"}</small>
+                <small>
+                  {clip.tracks} · {duration(clip.metadata) || "—"} ·{" "}
+                  {bytes(clip.size)}
+                </small>
+                <small>{timecode(clip.metadata)}</small>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
   return (
     <section className="table-section">
       <div className="table-tools">
@@ -64,6 +120,7 @@ export default function ClipTable({
               setSelected(next);
             }}
           />
+          <span>Thumbnail</span>
           <span>Clip / files</span>
           <span>Project</span>
           <span>Tracks</span>
@@ -120,6 +177,15 @@ export default function ClipTable({
                     } else setSelected(selectClip(selected, clip));
                   }}
                 />
+                <span>
+                  {!file && (
+                    <Poster
+                      path={thumbnails[clip.id]}
+                      name={clip.name}
+                      error={thumbnailErrors[clip.id]}
+                    />
+                  )}
+                </span>
                 <span className="clip-name" title={file?.path || clip.name}>
                   {file ? (
                     <Fragment>↳ {filename(file.path)}</Fragment>

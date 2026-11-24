@@ -2,6 +2,7 @@ pub mod clips;
 pub mod mdb;
 pub mod mxf;
 pub mod pmr;
+pub mod previews;
 pub mod scan;
 pub use scan::*;
 use serde::{Deserialize, Serialize};
