@@ -12,6 +12,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import MediaTable, { useStored } from "./MediaTable";
 import {
   bytes,
+  filename,
   diffRows,
   filter,
   projects,
@@ -556,15 +557,18 @@ function App() {
                     {r.total_bytes.toLocaleString()} bytes
                   </summary>
                   {r.database_files.map((db) => (
-                    <p key={db.path}>
-                      {db.path} — {db.description} ·{" "}
-                      <span title={`${db.size} bytes`}>{bytes(db.size)}</span> ·
-                      modified{" "}
-                      {db.modified_ns
-                        ? new Date(
-                            Number(db.modified_ns) / 1e6,
-                          ).toLocaleString()
-                        : "unknown"}
+                    <p
+                      key={db.path}
+                      title={`${db.path} · ${db.description} · Modified ${db.modified_ns ? new Date(Number(db.modified_ns) / 1e6).toLocaleString() : "unknown"}`}
+                    >
+                      {filename(db.path)} ·{" "}
+                      {db.path.toLowerCase().endsWith(".mdb")
+                        ? "Avid media database"
+                        : "Avid media index"}{" "}
+                      ·{" "}
+                      <span title={`${db.size.toLocaleString()} bytes`}>
+                        {bytes(db.size)}
+                      </span>
                       {db.pmr_missing !== null && (
                         <>
                           {" "}
