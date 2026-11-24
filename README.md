@@ -23,7 +23,60 @@ cargo run --release -- diff '/path/to/workspace'
 
 `--index /path/to/index.sqlite` works on every command, before or after its subcommand. Use the same path when querying a custom index. Without it, the index lives in the platform's local app-data directory (`directories::ProjectDirs`, application `MobBoss`). The index must be outside media directories and ordinarily outside the scanned tree. Whole-drive roots are an exception: the normal app-data directory is allowed, while media-directory guards still apply. Invalid destinations are rejected before creating files.
 
-Scanning is read-only for media and Avid databases. It never moves, renames, copies, or deletes media. Corrupt or unsupported files produce warnings and are skipped. Reported MXF totals count successfully identified files; warnings identify failures.
+Scanning is read-only for media and Avid databases. Scans never move, rename, copy, or delete media. Explicitly confirmed media operations are described below. Corrupt or unsupported files produce warnings and are skipped. Reported MXF totals count successfully identified files; warnings identify failures.
+
+## Move, Copy, Collect and Undo
+
+**Quit Media Composer on every machine using the media before executing an operation.** Mob Boss cannot reliably detect Avid's open files.
+
+Scan first, then preview an operation. Every command defaults to a dry run; `--yes` is the explicit confirmation to execute. `plan` always previews a Copy plan, even with `--yes`. Use the same `--index` when scanning, planning, executing and undoing.
+
+```sh
+mobboss scan '/Volumes/Editorial' --mode deep
+mobboss plan --project 'My Film' --dest '/Volumes/Shuttle'
+mobboss copy --project 'My Film' --dest '/Volumes/Shuttle'       # preview only
+mobboss copy --project 'My Film' --dest '/Volumes/Shuttle' --yes
+mobboss move --project 'My Film'                               # preview in-place move
+mobboss move --project 'My Film' --dest '/Volumes/Archive' --yes # another root/drive
+mobboss collect --project 'My Film'                            # preview per-drive moves
+mobboss collect --project 'My Film' --dest '/Volumes/Shuttle' --yes
+mobboss undo '/path/to/collect-log-<timestamp>.csv'             # preview only
+mobboss undo '/path/to/collect-log-<timestamp>.csv' --yes
+```
+
+Repeat `--file '/absolute/indexed/file.mxf'` to operate on an explicit selection instead of the entire project. The project name then names the collection folder. Ctrl-C cancels execution after the current file finishes safely.
+
+In the desktop app, choose one project or select table rows, then use **Actions → Move / Copy / Collect**. Choose an optional destination (required for Copy), inspect the dry-run drive summaries, free space, warnings, conflicts and complete action list, then continue to the explicit **Yes, I'm sure** confirmation. Progress includes Cancel. The result lists completed/skipped files, warnings, touched media folders and logs, with **Reveal log** and **Undo**. Actions also offers Undo from an older CSV log. The SQLite inventory refreshes immediately after execution or undo.
+
+### Layout and Avid visibility
+
+All destinations use this layout:
+
+```text
+<root>/Media By Project/<sanitized project>/Avid MediaFiles/MXF/<original folder>/<file.mxf>
+```
+
+Move defaults to each source drive/workspace root; `--dest` overrides it. Copy uses the chosen destination root. Collect performs all per-drive Moves first, then optionally Copies the results to the chosen destination. Source roots are inferred from the parent of `Avid MediaFiles` (an Avid drive or workspace). For arbitrary indexed MXF folders, the mounted filesystem root is used; choose an explicit destination if that root is not writable. Already collected paths retain their original drive root. `MEDIA_BY_PROJECT` in `crates/mobboss-core/src/plan.rs` is the single folder-name constant.
+
+**Avid scans `Avid MediaFiles` at a drive/volume root.** After collecting into a nested project folder, the editor must point Avid at that tree through an appropriate mounted volume/workspace. On NEXIS, use the project directory as the workspace root. Mob Boss does not mount volumes or make a nested tree automatically visible to Avid. The project name is made portable for Mac/Windows, including reserved names and trailing dots/spaces. Folder collisions from different source roots get a readable drive name and stable short drive ID; folders split at 5,000 MXFs into `.2`, `.3`, etc. MXF filenames and contents are preserved except that different-content filename conflicts get `_dup1`, `_dup2`, etc.
+
+### Safety model and logs
+
+- Planning reads only indexed source selections, checks size/mtime against the scan, computes BLAKE3 checksums and inventories destination conflicts. Free-space budgets include 5% plus 16 MiB margin. The budget conservatively reserves copy-sized space even for same-filesystem moves; the executor checks free space again before starting.
+- Existing files are never overwritten. Equal size and checksum means skip as a duplicate, retaining the original source (also for Move). Different content gets a planned suffix and warning. A file appearing after planning causes that action to skip; it is never silently renamed during execution.
+- Copy writes a new `.mobboss-partial` file, flushes it, verifies size and checksum, then atomically publishes it without replacement. Cross-filesystem Move follows that sequence and rechecks both copies before removing the original. Same-filesystem Move uses an atomic no-replace rename. Existing partial files are retained for inspection and block that filename; the program cleans up its own partial after a handled failure.
+- Every source is re-statted and rechecked before acting. Changed files skip with a warning; failed Collect moves prevent their dependent copy steps. Cancellation finishes the current file and leaves completed actions in the log. A force quit/power failure can leave a partial or a published complete copy; this is not a full crash-recovery system.
+- CSV journals record `op,source,dest,size,checksum,status`, flushed to disk before destructive steps. `intent`, `published` (verified cross-drive copy), `done`, `duplicate`, and skip records preserve what happened. Full operation journals are mirrored into each destination's `Media By Project/<Project>/collect-log-<timestamp>.csv` and local app-data. Undo previews move-back space requirements and writes a separate journal mirrored beside the original collection logs and in app-data. Keep the logs: use one complete log, not several mirrored copies of the same run.
+- Undo processes successful entries in reverse order. Moves return to the original path with the same no-overwrite and verification rules; copies are deleted only if their current checksum matches the log and the file is still indexed. Changed copies and occupied original paths are retained with a warning. Media contents and paths are restored; logs and empty collection directories remain for audit. Automatic recovery of a process killed between filesystem and SQLite updates is not implemented; rescan and inspect the journal before retrying.
+- Avid `.pmr` and `.mdb` files are never moved, deleted or written. **Avid will rebuild its media databases on next launch.** Results list touched media folders. The supplied NAS sample is explicitly blocked from all media operations; tests use temporary copies. Symlink paths and parent traversal are rejected.
+
+The safety suite includes two simulated drives, checksum comparisons before/after Collect + Undo, destination races, changed sources, stale partials, cancellation, duplicates and undo refusal after edits. To additionally run a real cross-filesystem round trip on Linux:
+
+```sh
+MOBBOSS_CROSS_FS=/dev/shm cargo test -p mobboss-core --test operations cross_filesystem -- --nocapture
+```
+
+This creates disposable files on `/tmp` and the requested second filesystem, verifies that `published` precedes `done` in each cross-device move journal, undoes the moves and compares original media checksums. It removes its own temporary files. Linux is verified locally; macOS/Windows atomic publication code still needs native platform testing.
 
 ## Scan modes
 
@@ -67,7 +120,7 @@ Deep scanning is I/O-bound on the tested NAS. Header reads now use a bounded wor
 
 ## Desktop app (Phase 2)
 
-The dark-first UI (with a light theme) provides multiple sources, mounted volumes/shares, Quick/Auto/Deep scans with live progress and cancellation, a virtualized media table, persisted sortable/resizable/hideable columns, multi-selection, full-column search and project/track/codec/folder filters. Projects show counts and sizes and export to CSV/HTML; the current filtered or selected table exports to CSV. Reveal opens Finder/Explorer at a selected file. Actions remain disabled: no media move/copy/delete or preview is implemented.
+The dark-first UI (with a light theme) provides multiple sources, mounted volumes/shares, Quick/Auto/Deep scans with live progress and cancellation, a virtualized media table, persisted sortable/resizable/hideable columns, multi-selection, full-column search and project/track/codec/folder filters. Projects show counts and sizes and export to CSV/HTML; the current filtered or selected table exports to CSV. Reveal opens Finder/Explorer at a selected file. The Actions menu provides Move, Copy, Collect, and log-based Undo for one selected project or selected indexed rows. Media playback preview and render cleanup remain unavailable.
 
 Mounted network shares must already be connected in your operating system. Settings shows the index path (default: local app-data) and lets you choose a different index and header concurrency. The backend rejects indexes and reports inside source/media folders. Whole-drive scanning permits the usual app-data index on that drive, with the same media-directory guards. A different index starts a separate library; it does not copy the old database. Exported CSV quotes fields and neutralizes spreadsheet formulas. Durations show `hh:mm:ss.mmm`, calculated from descriptor edit rate; audio duration uses samples.
 
@@ -119,3 +172,5 @@ The supplied sample's cold **index** scan delivered all 344 named files in **0.0
 The Linux libraries became available during implementation: WebKitGTK 2.52.6, GTK3 3.24.41, libsoup3 3.4.4 and xvfb. Full `npm run tauri -- build --debug --no-bundle` succeeds, and the native app runs under xvfb. Live checks scanned the sample into a temporary index, displayed all 344 project-named rows while enrichment was still in progress, then showed 344 verified files (21.6 GiB). Searching DNxHR SQ matched 296 files and selecting all showed 296 selected (21.25 GiB). Source files were never changed. No Linux build blocker remains. macOS/Windows builds and Finder/Explorer behavior still need native platform verification; the workflow has only been configured, not run.
 
 Screenshots: [media table](docs/screenshots/media-table.png), [projects summary and filtered selection in light mode](docs/screenshots/projects-summary.png), [progressive scan](docs/screenshots/scan-progress.png). Missing-file diff rows retain previously indexed metadata; PMR-only missing paths without prior metadata have unknown size/project. The diff view describes the latest completed scan in the current session.
+
+Phase 3 verification, exact test counts, native Collect/Undo evidence and current limits are recorded in [collect validation](docs/collect-validation.md).
