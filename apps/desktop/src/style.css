@@ -642,3 +642,116 @@ progress {
 .source button:first-child {
   max-width: calc(100% - 24px);
 }
+.operations-menu {
+  position: relative;
+}
+.actions-dropdown {
+  position: absolute;
+  right: 0;
+  top: 42px;
+  z-index: 40;
+  width: 265px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 35px #0006;
+}
+.actions-dropdown button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 4px 0;
+}
+.operation-modal {
+  max-height: 86vh;
+  overflow: auto;
+  width: min(800px, 92vw);
+}
+.operation-modal p {
+  line-height: 1.6;
+}
+.operation-modal pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  max-height: 170px;
+  overflow: auto;
+}
+.operation-modal details {
+  margin: 15px 0;
+}
+.operation-modal progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.destination-picker {
+  display: flex;
+  gap: 8px;
+}
+.plan-drives {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+}
+.plan-drives > div {
+  background: var(--raised);
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.plan-drives p {
+  margin: 4px 0;
+}
+.plan-drives small {
+  color: var(--muted);
+}
+.operation-warnings {
+  font-size: 12px;
+  line-height: 1.7;
+  padding-left: 18px;
+}
+.action-list {
+  max-height: 260px;
+  overflow: auto;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.action-list > div {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.action-list p {
+  margin: 3px 0;
+}
+.quit-warning {
+  padding: 18px;
+  border: 1px solid #dca94c;
+  border-radius: 8px;
+  background: #dca94c14;
+  color: var(--text);
+}
+.quit-warning strong {
+  color: #e7b354;
+  font-size: 17px;
+}
+.confirm-check {
+  display: flex !important;
+  align-items: center;
+  padding: 15px 0;
+}
+.confirm-check input {
+  width: auto;
+}
+.result-count {
+  font-size: 20px;
+  color: var(--accent);
+}
+.operation-error {
+  padding: 12px;
+  background: #d75d5d20;
+  border: 1px solid #d75d5d;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}

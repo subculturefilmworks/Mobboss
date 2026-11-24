@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -21,6 +27,7 @@ import {
   type Filters,
 } from "./model";
 import "./style.css";
+import Operations from "./Operations";
 const desktop = "__TAURI_INTERNALS__" in window;
 const emptyFilters: Filters = {
   search: "",
@@ -45,6 +52,17 @@ function App() {
   const [selected, setSelected] = useState(new Set<string>());
   const [progress, setProgress] = useState<Progress | null>(null);
   const [busy, setBusy] = useState(false);
+  const [operating, setOperating] = useState(false);
+  const operationBusy = useCallback((b: boolean) => {
+    setBusy(b);
+    setOperating(b);
+  }, []);
+  const refresh = useCallback(async () => {
+    setFiles(await invoke<MediaFile[]>("files"));
+    setSelected(new Set());
+    setReports([]);
+    setArchived([]);
+  }, []);
   const [reports, setReports] = useState<Report[]>([]);
   const [notice, setNotice] = useState(
     desktop
@@ -225,11 +243,17 @@ function App() {
           <h1>Mob Boss</h1>
           <p>Media management for Avid Media Composer</p>
         </div>
-        <span className="readonly">● READ ONLY</span>
+        <span className="readonly">● PLAN FIRST</span>
         <div className="header-actions">
-          <button disabled title="Media actions arrive in a later phase">
-            Actions ▾
-          </button>
+          <Operations
+            disabled={!ready || busy}
+            files={files}
+            project={filters.projects.length === 1 ? filters.projects[0] : ""}
+            selected={selected}
+            onBusy={operationBusy}
+            onRefresh={refresh}
+            onError={setNotice}
+          />
           <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? "☀ Light" : "☾ Dark"}
           </button>
@@ -380,7 +404,8 @@ function App() {
             </button>
           </div>
           <div className="sidebar-foot">
-            MXF inventory · Phase 2<br />
+            Verified media management
+            <br />
             Your media stays where it belongs.
           </div>
         </aside>
@@ -476,7 +501,7 @@ function App() {
               Clear filters
             </button>
           </div>
-          {busy && (
+          {busy && !operating && (
             <div className="progress-panel" role="status">
               <div>
                 <strong>
@@ -516,7 +541,10 @@ function App() {
               <details>
                 <summary>
                   {reports.reduce((n, r) => n + r.warnings.length, 0)} scan
-                  warnings
+                  warning
+                  {reports.reduce((n, r) => n + r.warnings.length, 0) === 1
+                    ? ""
+                    : "s"}
                 </summary>
                 <pre>{reports.flatMap((r) => r.warnings).join("\n")}</pre>
               </details>
