@@ -29,6 +29,9 @@ export default function Player({
     r && r.numerator > 0
       ? r.denominator / r.numerator
       : 1 / (clip.metadata.timecode_fps || 24);
+  const uncompressedTitle = clip.files.some(
+    (f) => f.metadata.codec === "DNxUncompressed",
+  );
   const audio = clipAudioFiles(clip);
   const [left, setLeft] = useState(0),
     [right, setRight] = useState(audio.length > 1 ? 1 : -1);
@@ -81,6 +84,10 @@ export default function Player({
     setFraction(0);
     setPosition(0);
     setLength(0);
+    if (uncompressedTitle) {
+      setBusy(false);
+      return;
+    }
     (async () => {
       unlisten = await listen<{ request_id: string; fraction: number }>(
         "proxy-progress",
@@ -214,7 +221,6 @@ export default function Player({
         </div>
         <video
           ref={video}
-          controls
           autoPlay
           playsInline
           preload="metadata"
@@ -231,68 +237,79 @@ export default function Player({
               );
           }}
         />
-        <div className="player-transport">
-          <button
-            disabled={!path}
-            onClick={() => {
-              if (video.current?.paused) play();
-              else {
-                stopReverse();
-                video.current?.pause();
-              }
-            }}
-          >
-            {playing ? "Pause" : "Play"}
-          </button>
-          <input
-            type="range"
-            aria-label="Scrub preview"
-            min={0}
-            max={Number.isFinite(length) ? length : 0}
-            step={frameStep}
-            value={position}
-            disabled={!path}
-            onChange={(e) => seek(Number(e.target.value))}
-          />
-          <output>{timecode(clip.metadata, position)}</output>
-        </div>
-        <p className="hint">
-          J reverse · K pause · L forward · ← / → step a frame ·{" "}
-          {position.toFixed(2)} /{" "}
-          {Number.isFinite(length) ? length.toFixed(2) : "0.00"} s
-        </p>
-        {audio.length > 0 && (
-          <div className="audio-selectors">
-            <label>
-              Left / mono
-              <select
-                value={left}
-                onChange={(e) => setLeft(Number(e.target.value))}
+        {uncompressedTitle && (
+          <p role="status" className="hint">
+            Preview not available for DNxUncompressed (Avid uncompressed title).
+          </p>
+        )}
+        {!uncompressedTitle && (
+          <>
+            <div className="player-transport">
+              <button
+                disabled={!path}
+                onClick={() => {
+                  if (video.current?.paused) play();
+                  else {
+                    stopReverse();
+                    video.current?.pause();
+                  }
+                }}
               >
-                {audio.map((f, i) => (
-                  <option disabled={i === right} key={f.path} value={i}>
-                    A{i + 1} · {filename(f.path)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {audio.length > 1 && (
-              <label>
-                Right
-                <select
-                  value={right}
-                  onChange={(e) => setRight(Number(e.target.value))}
-                >
-                  <option value={-1}>Duplicate left to both speakers</option>
-                  {audio.map((f, i) => (
-                    <option disabled={i === left} key={f.path} value={i}>
-                      A{i + 1} · {filename(f.path)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                {playing ? "Pause" : "Play"}
+              </button>
+              <input
+                type="range"
+                aria-label="Scrub preview"
+                min={0}
+                max={Number.isFinite(length) ? length : 0}
+                step={frameStep}
+                value={position}
+                disabled={!path}
+                onChange={(e) => seek(Number(e.target.value))}
+              />
+              <output>{timecode(clip.metadata, position)}</output>
+            </div>
+            <p className="hint">
+              J reverse · K pause · L forward · ← / → step a frame ·{" "}
+              {position.toFixed(2)} /{" "}
+              {Number.isFinite(length) ? length.toFixed(2) : "0.00"} s
+            </p>
+            {audio.length > 0 && (
+              <div className="audio-selectors">
+                <label>
+                  Left / mono
+                  <select
+                    value={left}
+                    onChange={(e) => setLeft(Number(e.target.value))}
+                  >
+                    {audio.map((f, i) => (
+                      <option disabled={i === right} key={f.path} value={i}>
+                        A{i + 1} · {filename(f.path)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {audio.length > 1 && (
+                  <label>
+                    Right
+                    <select
+                      value={right}
+                      onChange={(e) => setRight(Number(e.target.value))}
+                    >
+                      <option value={-1}>
+                        Duplicate left to both speakers
+                      </option>
+                      {audio.map((f, i) => (
+                        <option disabled={i === left} key={f.path} value={i}>
+                          A{i + 1} · {filename(f.path)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
             )}
-          </div>
+          </>
         )}
         {busy && (
           <div className="proxy-progress" role="status">

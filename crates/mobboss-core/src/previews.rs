@@ -268,6 +268,10 @@ impl PreviewCache {
         file: &MediaFile,
         cancel: &CancellationToken,
     ) -> Result<PathBuf> {
+        ensure!(
+            file.metadata.codec.as_deref() != Some("DNxUncompressed"),
+            "No preview (Avid uncompressed title)"
+        );
         verify_source(file)?;
         self.generate(&cache_key(file), "jpg", |temp| {
             ffmpeg.run(&thumbnail_args(file, temp), cancel, |_| {})?;

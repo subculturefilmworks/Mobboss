@@ -32,7 +32,7 @@ The full read-only sample header scan found **356 files / 310 material clips**:
 for 189 file headers. These counts describe package identities, not equal names.
 The source media tree was never written.
 
-- `cargo test --workspace`: 71 tests, including grouping/migration, TC fixtures,
+- `cargo test --workspace`: 75 tests, including grouping/migration, TC fixtures,
   cache keys, LRU/protected entries, orphan cleanup, retry safety, platform encoder
   arguments and mono/stereo/sync-offset construction. The real-codec test skips
   cleanly without both environment variables below.
@@ -125,19 +125,69 @@ source/version/checksum links and full license texts.
 The sample's DNxUncompressed RGBA titles contain the `rl16` run-length variant.
 Official 8.0.1/8.1.3 and the checked BtbN 8.1 binaries expose its parser but no
 DNxUC decoder. The upstream proposed decoder handles other RGB/YUV variants,
-not this rl16 variant. These title previews remain unavailable, with error
-messages and retry controls; grouping, inventory and actions still work. No
+not this rl16 variant. These title previews remain unavailable, with a plain
+“No preview (Avid uncompressed title)” tile and an unsupported-playback note; grouping, inventory and actions still work. No
 claim is made that alpha title rendering has passed. The real-codec test attempts
-the copied title and validates the missing-decoder failure instead of claiming a
-successful thumbnail. This remains a departure from the requested completion
+the copied title and validates the friendly unsupported-codec result instead of
+claiming a successful thumbnail. The player shows an existing poster when present
+and does not launch a title proxy. No ffmpeg patch or Rust title decoder was added;
+the accepted limitation remains. This remains a departure from the requested completion
 criteria.
 
 ### Measured sizes
 
 The pinned Windows `ffmpeg.exe` is **134,050,304 bytes** (134.05 MB / 127.84 MiB).
+The executable alone compresses to **55,739,760 bytes** (55.74 MB / 53.16 MiB)
+in a ZIP using DEFLATE level 6. This excludes MobBoss.exe and notices; it is not
+the complete portable download size. The workflow explicitly uses level 6 and
+warns in its summary if the final Windows ZIP exceeds 60,000,000 bytes.
 Final Mac app/DMG and Windows application ZIP sizes cannot be measured on this
 Linux host and must be reported from the native workflow after review.
 
-The Linux release executable is **15,948,760 bytes** (15.95 MB); the debug
-executable is 230,094,496 bytes. Linux has no packaged sidecar or distributable
+The Linux release executable is **15,951,912 bytes** (15.95 MB); the debug
+executable is 230,195,824 bytes. Linux has no packaged sidecar or distributable
 bundle in this phase. These Linux sizes do not predict Mac/Windows bundle sizes.
+
+
+## Review fixes
+
+- Actions are **Move / Copy / Move & Backup**. Move & Backup requires a backup
+  destination in the GUI, CLI (`collect` and `move-and-backup`) and core planner.
+  Missing destinations fail before transfers. Journals still record actual
+  `move`/`copy` steps and Undo remains compatible with existing logs.
+- Plan and confirmation dialogs state what happens to originals. Native xvfb
+  verified the empty-destination refusal, a four-action dry run (two moves plus
+  two copies), and confirmation still disabled until acknowledged. No transfer
+  was executed during this review check. Sidebar footer text is removed.
+- The reconciliation total explicitly uses `en-US` for consistent grouping under
+  the headless C locale. The panel remains collapsed by default.
+- Native video controls are hidden. The custom transport's slider and focus use
+  blue accent tokens. WebKit inspection verified `controls=false`, successful
+  seeking to three seconds, and RGB(106,168,255) focus/slider colors.
+- Minimal Mac ffmpeg explicitly includes null/anull, aformat, anullsrc, trim,
+  sources and sinks alongside the actual composition/audio filters.
+- The release workflow gates **both macOS and Windows** on the production cache,
+  thumbnail and proxy argument builders. The committed synthetic OP-Atom inputs
+  total **409,771 bytes** (one second of DNxHR LB plus two PCM tone tracks), generated
+  from testsrc2/sine, without sample essence. The test requires a complete JPEG;
+  native outputs must contain H.264 and two-channel AAC in faststart MP4 for both
+  mono duplication and two-track merging. MP4 boxes are inspected in Rust so the
+  bundle does not need ffprobe. Missing ffmpeg fails the release gate; unsupported
+  native hardware encoding also fails, without silently substituting encoders.
+- Fixture tests exposed and fixed KAG-aligned header extents, versioned filler ULs,
+  and sequence-based durations when a descriptor omits ContainerDuration. The
+  bounded header-read/essence guard tests still pass.
+- Both synthetic proxy cases pass locally with development ffmpeg 6.1.1 and the
+  checked LGPL Linux 8.1 build (Linux outputs WebM). The copied sample integration
+  passes too. Native Mac/Windows JPEG/MP4 smoke runs are **configured, not run**;
+  SDK/device support and actual native bundle sizes remain pending a native build.
+- README describes the first Mac compilation (about 5–15 minutes), ignored cache
+  directories and invalidation conditions. A normal git pull preserves the cache.
+
+Updated sanitized evidence: [Clips](screenshots/clips.png),
+[Grid](screenshots/grid.png), [player](screenshots/player.png),
+[Actions](screenshots/actions.png), [required backup](screenshots/backup-required.png),
+[backup plan](screenshots/move-and-backup-plan.png),
+[backup confirmation](screenshots/move-and-backup-confirm.png),
+[title tile](screenshots/title-placeholder.png), [title player](screenshots/title-player.png).
+All screenshots come from temporary generic Sample Drive / Sample Project copies.

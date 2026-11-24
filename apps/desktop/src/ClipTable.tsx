@@ -75,6 +75,9 @@ export default function ClipTable({
                 path={thumbnails[clip.id]}
                 name={clip.name}
                 error={thumbnailErrors[clip.id]}
+                uncompressedTitle={clip.files.some(
+                  (f) => f.metadata.codec === "DNxUncompressed",
+                )}
               />
               <div>
                 <label onClick={(e) => e.stopPropagation()}>
@@ -209,6 +212,9 @@ export default function ClipTable({
                       path={thumbnails[clip.id]}
                       name={clip.name}
                       error={thumbnailErrors[clip.id]}
+                      uncompressedTitle={clip.files.some(
+                        (f) => f.metadata.codec === "DNxUncompressed",
+                      )}
                     />
                   )}
                 </span>

@@ -89,8 +89,8 @@ fn copied_sample_previews() -> anyhow::Result<()> {
                 // use rl16, which the unmerged decoder patch does not handle either.
                 let message = e.to_string();
                 assert!(
-                    message.contains("decoder") || message.contains("Decoder"),
-                    "unexpected title failure: {message}"
+                    message == "No preview (Avid uncompressed title)",
+                    "unexpected title placeholder: {message}"
                 );
                 eprintln!("DNxUncompressed title limitation verified: {message}");
             }

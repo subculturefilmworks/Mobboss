@@ -101,11 +101,18 @@ export function Poster({
   path,
   name,
   error,
+  uncompressedTitle = false,
 }: {
   path?: string;
   name: string;
   error?: string;
+  uncompressedTitle?: boolean;
 }) {
+  const label = uncompressedTitle
+    ? "No preview (Avid uncompressed title)"
+    : error
+      ? "Preview unavailable"
+      : "No thumbnail";
   return path ? (
     <img
       className="poster"
@@ -117,10 +124,16 @@ export function Poster({
   ) : (
     <span
       className="poster placeholder"
-      aria-label={error ? "Preview unavailable" : "No thumbnail"}
-      title={error ? `Preview unavailable: ${error}` : "No thumbnail"}
+      aria-label={label}
+      title={
+        uncompressedTitle
+          ? label
+          : error
+            ? `Preview unavailable: ${error}`
+            : label
+      }
     >
-      {error ? "Unavailable" : "No preview"}
+      {uncompressedTitle ? label : error ? "Unavailable" : "No preview"}
     </span>
   );
 }
