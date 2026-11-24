@@ -255,15 +255,33 @@ const escapeHtml = (s: string) =>
         c
       ]!,
   );
-export function summaryHtml(files: MediaFile[]) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Mob Boss project summary</title><style>body{font:16px system-ui;margin:3rem}table{border-collapse:collapse}td,th{padding:12px;border-bottom:1px solid #ccc;text-align:left}</style><h1>Mob Boss · Projects</h1><table><thead><tr><th>Project</th><th>Files</th><th>Size</th></tr></thead><tbody>${projects(
+export function summaryHtml(
+  files: MediaFile[],
+  thumbnails?: Record<string, string>,
+) {
+  const clipTable = thumbnails
+    ? `<h2>Clips</h2><table><thead><tr><th>Poster</th><th>Clip</th><th>Project</th><th>Tracks</th><th>Duration</th><th>Start TC</th></tr></thead><tbody>${groupClips(
+        files,
+      )
+        .map((c) => {
+          const src = thumbnails[c.id];
+          const poster =
+            src && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(src)
+              ? `<img width="160" alt="Clip poster" src="${src}">`
+              : "Unavailable";
+          return `<tr><td>${poster}</td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.metadata.project || "Unknown")}</td><td>${escapeHtml(c.tracks)}</td><td>${duration(c.metadata)}</td><td>${timecode(c.metadata)}</td></tr>`;
+        })
+        .join("")}</tbody></table>`
+    : "";
+
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Mob Boss project summary</title><style>body{font:16px system-ui;margin:3rem}table{border-collapse:collapse}td,th{padding:12px;border-bottom:1px solid #ccc;text-align:left}img{display:block;max-width:160px}tr{break-inside:avoid}@media print{body{margin:0;font-size:11px}button{display:none}thead{display:table-header-group}td,th{padding:6px}}</style><button onclick="window.print()">Print / Save as PDF</button><h1>Mob Boss · Projects</h1><table><thead><tr><th>Project</th><th>Files</th><th>Size</th></tr></thead><tbody>${projects(
     files,
   )
     .map(
       (p) =>
         `<tr><td>${escapeHtml(p.name)}</td><td>${p.count}</td><td>${bytes(p.size)} (${p.size} bytes)</td></tr>`,
     )
-    .join("")}</tbody></table></html>`;
+    .join("")}</tbody></table>${clipTable}</html>`;
 }
 export function diffRows(
   files: MediaFile[],

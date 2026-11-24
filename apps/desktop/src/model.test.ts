@@ -182,3 +182,20 @@ it("groups only UIDs and selects the complete clip even when members were filter
   ).toBe("00:01:00;02");
   expect(timecode({})).toBe("—");
 });
+
+it("HTML thumbnails are opt-in, one per clip, constrained to JPEG data, and printable", async () => {
+  const { groupClips } = await import("./model");
+  const a = file("/media/a", "<Film>"),
+    b = file("/media/b", "<Film>");
+  a.metadata.material_package_uid = b.metadata.material_package_uid = "one";
+  const id = groupClips([a, b])[0].id;
+  expect(summaryHtml([a, b])).not.toContain("<img");
+  const html = summaryHtml([a, b], { [id]: "data:image/jpeg;base64,/9j/AA==" });
+  expect(html.match(/<img/g)).toHaveLength(1);
+  expect(html).toContain("Print / Save as PDF");
+  expect(html).toContain("@media print");
+  expect(html).toContain("&lt;Film&gt;");
+  expect(summaryHtml([a], { [id]: "file:///private/image.jpg" })).not.toContain(
+    "<img",
+  );
+});

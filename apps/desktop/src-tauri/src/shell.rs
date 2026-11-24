@@ -254,6 +254,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             crate::dialog::pick_path,
             crate::preview::preview_status,
+            crate::preview::thumbnail_data,
             crate::preview::start_thumbnails,
             crate::preview::cancel_thumbnails,
             settings,

@@ -110,3 +110,43 @@ pub fn start_thumbnails(app: tauri::AppHandle, state: State<AppState>) -> Reply<
     });
     Ok(())
 }
+
+#[tauri::command]
+pub fn thumbnail_data(
+    clip_ids: Vec<String>,
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Reply<BTreeMap<String, String>> {
+    use base64::Engine;
+    let settings = state.settings.lock().map_err(err)?.clone();
+    let clips = mobboss_core::clips::group(service::files(&settings).map_err(err)?);
+    let wanted: std::collections::BTreeSet<_> = clip_ids.into_iter().collect();
+    let cache = cache(&app).map_err(err)?;
+    let mut data = BTreeMap::new();
+    for clip in clips.into_iter().filter(|c| wanted.contains(&c.id)) {
+        if let Some(file) = clip
+            .files
+            .iter()
+            .find(|f| f.metadata.track_kind.as_deref() == Some("video"))
+        {
+            if let Some(path) = cache
+                .existing(&previews::cache_key(file), "jpg")
+                .map_err(err)?
+            {
+                if std::fs::metadata(&path).map_err(err)?.len() <= 256_000 {
+                    let jpeg = std::fs::read(path).map_err(err)?;
+                    if jpeg.starts_with(&[0xff, 0xd8]) {
+                        data.insert(
+                            clip.id,
+                            format!(
+                                "data:image/jpeg;base64,{}",
+                                base64::engine::general_purpose::STANDARD.encode(jpeg)
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(data)
+}

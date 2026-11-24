@@ -75,6 +75,7 @@ function App() {
       ? ""
       : "Browser preview · Open the desktop app to scan local media.",
   );
+  const [includeThumbnails, setIncludeThumbnails] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const pending = useRef(new Map<string, MediaFile>());
@@ -408,6 +409,14 @@ function App() {
               </small>
             </label>
           ))}
+          <label className="report-thumbnails">
+            <input
+              type="checkbox"
+              checked={includeThumbnails}
+              onChange={(e) => setIncludeThumbnails(e.target.checked)}
+            />
+            Include thumbnails in HTML
+          </label>
           <div className="summary-exports">
             <button
               onClick={() =>
@@ -418,7 +427,21 @@ function App() {
             </button>
             <button
               onClick={() =>
-                run(() => exportContent("projects.html", summaryHtml(files)))
+                run(async () => {
+                  const thumbnails =
+                    includeThumbnails && desktop
+                      ? await invoke<Record<string, string>>("thumbnail_data", {
+                          clipIds: groupClips(files).map((c) => c.id),
+                        })
+                      : undefined;
+                  await exportContent(
+                    "projects.html",
+                    summaryHtml(
+                      files,
+                      includeThumbnails ? thumbnails || {} : undefined,
+                    ),
+                  );
+                })
               }
             >
               HTML ↗

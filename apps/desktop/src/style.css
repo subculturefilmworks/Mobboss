@@ -826,10 +826,9 @@ progress {
 }
 .clip-head,
 .clip-row {
-  grid-template-columns: 24px 76px minmax(240px, 2.5fr) minmax(
-      140px,
-      1.5fr
-    ) 115px 125px 115px 90px;
+  grid-template-columns:
+    24px 76px minmax(240px, 2.5fr) minmax(140px, 1.5fr)
+    115px 125px 115px 90px;
   min-width: 1050px;
 }
 .poster {
@@ -902,4 +901,12 @@ progress {
 }
 .preview-status button {
   padding: 4px 8px;
+}
+.report-thumbnails {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 16px 12px 0;
 }

@@ -14,6 +14,7 @@ default = []
 desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
 [dependencies]
 mobboss-core = { path = "../../../crates/mobboss-core" }
+base64 = "0.22"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
