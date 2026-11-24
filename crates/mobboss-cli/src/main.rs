@@ -192,6 +192,30 @@ fn main() -> Result<()> {
                 "{} MXFs; {} headers read; {} cached; {:.3}s",
                 r.files, r.headers_read, r.cached, r.elapsed_seconds
             );
+            let c = &r.reconciliation;
+            println!("{} media files · {} Avid database files (.pmr/.mdb) · {} other files · {} folders — total {} bytes", c.media_files, c.database_files.len(), c.other_files, c.folders, c.total_bytes);
+            for db in &c.database_files {
+                println!(
+                    "{}: {}; {}; modified ns {}",
+                    db.path.display(),
+                    db.description,
+                    display_bytes(db.size),
+                    db.modified_ns
+                );
+                if let (Some(missing), Some(extra)) = (db.pmr_missing, db.pmr_extra) {
+                    println!(
+                        "PMR vs MXF: {}",
+                        if missing == 0 && extra == 0 {
+                            "agree".into()
+                        } else {
+                            format!("{missing} missing from disk / {extra} extra on disk")
+                        }
+                    );
+                }
+            }
+            for name in &c.other_names {
+                println!("Other: {}", name.display());
+            }
             for (p, n) in r.projects {
                 println!("{p}: {n}");
             }
@@ -258,17 +282,7 @@ fn main() -> Result<()> {
 }
 
 fn display_bytes(value: u64) -> String {
-    if value >= 1024 * 1024 * 1024 {
-        format!(
-            "{:.2} GiB ({value} bytes)",
-            value as f64 / (1024.0 * 1024.0 * 1024.0)
-        )
-    } else {
-        format!(
-            "{:.2} MiB ({value} bytes)",
-            value as f64 / (1024.0 * 1024.0)
-        )
-    }
+    format!("{} ({value} bytes)", mobboss_core::format_size(value))
 }
 fn drive_summary(drives: &[mobboss_core::plan::DriveSummary]) -> String {
     use std::fmt::Write;

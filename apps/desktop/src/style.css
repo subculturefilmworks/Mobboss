@@ -755,3 +755,15 @@ progress {
   border-radius: 6px;
   overflow-wrap: anywhere;
 }
+
+.reconciliation {
+  margin: 8px 20px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.reconciliation p {
+  margin: 8px 0;
+}
+.reconciliation pre {
+  white-space: pre-wrap;
+}

@@ -8,6 +8,8 @@ import {
   projects,
   csv,
   summaryHtml,
+  summaryCsv,
+  tableCsv,
   diffRows,
   type MediaFile,
   type Filters,
@@ -33,9 +35,15 @@ const defaults: Filters = {
   diff: "",
 };
 describe("formatting and exports", () => {
-  it("uses binary units and descriptor edit-rate duration, including audio samples", () => {
+  it("uses platform units and descriptor edit-rate duration, including audio samples", () => {
     expect(bytes(0)).toBe("0 B");
-    expect(bytes(1024)).toBe("1 KiB");
+    expect(bytes(1000, "MacIntel")).toBe("1 KB");
+    expect(bytes(1024, "Win32")).toBe("1 KB");
+    const finderBytes = 315636807021;
+    expect(bytes(finderBytes, "MacIntel")).toBe("315.64 GB");
+    expect(bytes(finderBytes, "Win32")).toBe("293.96 GB");
+    expect(2449 + 8 + 5 + 4).toBe(2466);
+    expect((293.94 * 1024 ** 3) / 1000 ** 3).toBeCloseTo(315.62, 2);
     expect(
       duration({
         duration: 198,
@@ -51,6 +59,12 @@ describe("formatting and exports", () => {
     expect(
       duration({ duration: 1, edit_rate: { numerator: 0, denominator: 1 } }),
     ).toBe("");
+  });
+  it("retains exact byte counts in HTML and CSV exports", () => {
+    const f = file("/media/a.mxf", "Project", 315636807021);
+    expect(summaryHtml([f])).toContain("315636807021 bytes");
+    expect(summaryCsv([f])).toContain("315636807021");
+    expect(tableCsv([row(f)])).toContain("315636807021");
   });
   it("quotes CSV, preserves newlines, and neutralizes spreadsheet formulas", () => {
     expect(csv([['a,"b\nc', "=SUM(A1)", 4]])).toBe(

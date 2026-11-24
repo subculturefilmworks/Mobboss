@@ -338,11 +338,21 @@ export default function Operations({
                         <div key={d.root}>
                           <strong>{d.root}</strong>
                           <p>
-                            {d.files} actions · {bytes(d.bytes)} ·{" "}
-                            {bytes(d.available)} free
+                            {d.files} actions ·{" "}
+                            <span title={`${d.bytes} bytes`}>
+                              {bytes(d.bytes)}
+                            </span>{" "}
+                            ·{" "}
+                            <span title={`${d.available} bytes`}>
+                              {bytes(d.available)}
+                            </span>{" "}
+                            free
                           </p>
                           <small>
-                            Required including margin: {bytes(d.required)}
+                            Required including margin:{" "}
+                            <span title={`${d.required} bytes`}>
+                              {bytes(d.required)}
+                            </span>
                           </small>
                         </div>
                       ))}
@@ -388,8 +398,15 @@ export default function Operations({
                         <div key={d.root}>
                           <strong>{d.root}</strong>
                           <p>
-                            {d.files} move-backs · {bytes(d.available)} free ·{" "}
-                            {bytes(d.required)} required with margin
+                            {d.files} move-backs ·{" "}
+                            <span title={`${d.available} bytes`}>
+                              {bytes(d.available)}
+                            </span>{" "}
+                            free ·{" "}
+                            <span title={`${d.required} bytes`}>
+                              {bytes(d.required)}
+                            </span>{" "}
+                            required with margin
                           </p>
                         </div>
                       ))}
