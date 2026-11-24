@@ -1,0 +1,86 @@
+[
+  {
+    "path": "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1/V01.64CD446D_F8BBCF8BBC00DV.mxf",
+    "folder": "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1",
+    "size": 126019681,
+    "modified_ns": "1691174001212822700",
+    "metadata": {
+      "material_package_uid": "060a2b340101010501010f1013000000f8b73a8d01608506794818c04d8a4278",
+      "file_package_uid": "060a2b340101010501010f1013000000f8bbc00d01608506d9cb18c04d8a4278",
+      "clip_name": "20151911_DJI_0003.new.01",
+      "project": "BD Demo Reel",
+      "track_kind": "video",
+      "codec": "DNxHR",
+      "codec_ul": "060e2b340401010d0401020271270000",
+      "edit_rate": {
+        "numerator": 24000,
+        "denominator": 1001
+      },
+      "sample_rate": null,
+      "duration": 198,
+      "width": 1920,
+      "height": 1080,
+      "bit_depth": 8,
+      "created": "2023-08-04T18:33:11.000Z",
+      "modified": "2023-08-04T18:33:21.000Z",
+      "kind": null
+    }
+  },
+  {
+    "path": "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1/150928A01.64CD450AF9124D40A.mxf",
+    "folder": "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1",
+    "size": 6292065,
+    "modified_ns": "1691174111895369300",
+    "metadata": {
+      "material_package_uid": "060a2b340101010501010f1013000000f8b74906016085069ac518c04d8a4278",
+      "file_package_uid": "060a2b340101010501010f1013000000f9124d4001608506f59d18c04d8a4278",
+      "clip_name": "/01.new.01",
+      "project": "BD Demo Reel",
+      "track_kind": "audio",
+      "codec": "PCM",
+      "codec_ul": null,
+      "edit_rate": {
+        "numerator": 48000,
+        "denominator": 1
+      },
+      "sample_rate": {
+        "numerator": 48000,
+        "denominator": 1
+      },
+      "duration": 690690,
+      "width": null,
+      "height": null,
+      "bit_depth": 16,
+      "created": "2023-08-04T18:33:11.000Z",
+      "modified": "2023-08-04T18:35:11.000Z",
+      "kind": null
+    }
+  },
+  {
+    "path": "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1/V02.64CD447F_F8C79F8C793D6V.mxf",
+    "folder": "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1",
+    "size": 6472801,
+    "modified_ns": "1691174014032590100",
+    "metadata": {
+      "material_package_uid": "060a2b340101010501010f1013000000f8b73b4d01608506a59218c04d8a4278",
+      "file_package_uid": "060a2b340101010501010f1013000000f8c793d601608506cb6e18c04d8a4278",
+      "clip_name": "Untitled.new.01",
+      "project": "BD Demo Reel",
+      "track_kind": "video",
+      "codec": "DNxUncompressed",
+      "codec_ul": "060e2b340401010d0401020203070100",
+      "edit_rate": {
+        "numerator": 24000,
+        "denominator": 1001
+      },
+      "sample_rate": null,
+      "duration": 1,
+      "width": 1920,
+      "height": 1080,
+      "bit_depth": 16,
+      "created": "2023-08-04T18:33:11.000Z",
+      "modified": "2023-08-04T18:33:33.000Z",
+      "kind": null
+    }
+  }
+]
