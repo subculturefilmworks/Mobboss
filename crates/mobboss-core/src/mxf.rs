@@ -288,7 +288,9 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
             m.codec = if audio && d.key.ends_with("014800") {
                 Some("PCM".into())
             } else {
-                m.codec_ul.as_deref().map(codec_name).map(str::to_owned)
+                m.codec_ul
+                    .as_deref()
+                    .map(|ul| codec_label(ul, m.edit_rate.as_ref()))
             };
         }
     }
@@ -299,6 +301,32 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
     // Do not guess captured/imported/render from a filename: provenance needs verified private properties.
     Ok(m)
 }
+/// Resolve a nominal DNxHD bitrate only for recognized UL/rate combinations.
+/// CID/UL facts: FFmpeg mxfenc.c registry; other rates retain a profile label.
+pub fn codec_label(ul: &str, rate: Option<&Rational>) -> String {
+    let family = codec_name(ul);
+    if family == "DNxHD 1080p 8-bit Medium" {
+        if let Some(rate) = rate {
+            let n = i64::from(rate.numerator);
+            let d = i64::from(rate.denominator);
+            if d > 0 {
+                let nominal = if n == 24 * d || n * 1001 == 24000 * d {
+                    Some(115)
+                } else if n == 25 * d {
+                    Some(120)
+                } else if n == 30 * d || n * 1001 == 30000 * d {
+                    Some(145)
+                } else {
+                    None
+                };
+                if let Some(value) = nominal {
+                    return format!("DNxHD {value}");
+                }
+            }
+        }
+    }
+    family.into()
+}
 pub fn codec_name(ul: &str) -> &'static str {
     if ul.starts_with("060e2b340401") && ul.get(16..24) == Some("04010202") {
         match ul.get(24..28) {
@@ -307,6 +335,21 @@ pub fn codec_name(ul: &str) -> &'static str {
             Some("7126") => "DNxHR HQ",
             Some("7127") => "DNxHR SQ",
             Some("7128") => "DNxHR LB",
+            Some("7101") => "DNxHD 1080p 10-bit High",
+            Some("7103") => "DNxHD 1080p 8-bit Medium",
+            Some("7104") => "DNxHD 1080p 8-bit High",
+            Some("7107") => "DNxHD 1080i 10-bit High",
+            Some("7108") => "DNxHD 1080i 8-bit Medium",
+            Some("7109") => "DNxHD 1080i 8-bit High",
+            Some("710a") => "DNxHD 1080i 8-bit Thin Raster",
+            Some("7110") => "DNxHD 720p 10-bit",
+            Some("7111") => "DNxHD 720p 8-bit High",
+            Some("7112") => "DNxHD 720p 8-bit Medium",
+            Some("7113") => "DNxHD 1080p 8-bit Low",
+            Some("7116") => "DNxHD 1080p 10-bit 444",
+            Some("7118") => "DNxHD 720p 8-bit Thin Raster",
+            Some("7119") => "DNxHD 1080p 8-bit Thin Raster",
+            Some("711a") => "DNxHD 1080i 8-bit Thin Raster",
             Some("0307") => "DNxUncompressed",
             Some("0306") => "ProRes",
             Some("0201") => "DV",

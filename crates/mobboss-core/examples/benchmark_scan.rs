@@ -2,7 +2,9 @@ use mobboss_core::{CancellationToken, Index, ScanMode, ScanOptions, ScanPhase};
 use std::{path::PathBuf, time::Instant};
 fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(std::env::args().nth(1).expect("media root"));
-    for concurrency in [1, 4, 8, 16] {
+    let order = std::env::args().nth(2).unwrap_or_else(|| "1,4,8,16".into());
+    for concurrency in order.split(',').map(str::parse::<usize>) {
+        let concurrency = concurrency?;
         let path = std::env::temp_dir().join(format!(
             "mobboss-bench-{}-{concurrency}.sqlite",
             std::process::id()

@@ -97,6 +97,12 @@ pub fn default_index() -> Result<PathBuf> {
         .join("index.sqlite"))
 }
 fn canonical_destination(path: &Path) -> Result<PathBuf> {
+    ensure!(
+        !path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir),
+        "destination cannot contain parent traversal (..) components"
+    );
     if path.exists() {
         return Ok(path.canonicalize()?);
     }
@@ -153,7 +159,7 @@ impl Index {
         let root = root.canonicalize()?;
         let dest = canonical_destination(path)?;
         ensure!(
-            !dest.starts_with(&root),
+            !dest.starts_with(&root) || root.parent().is_none(),
             "index must be outside the scanned media tree"
         );
         Self::open(&dest)
@@ -169,8 +175,15 @@ impl Index {
         Ok(Self { conn, path })
     }
     pub fn files(&self, project: Option<&str>) -> Result<Vec<MediaFile>> {
-        let mut q=self.conn.prepare("SELECT path,folder,size,modified_ns,metadata FROM files WHERE present=1 AND (?1 IS NULL OR project=?1) ORDER BY path")?;
-        let rows = q.query_map([project], |r| {
+        self.read_files(project, false)
+    }
+    /// Retained rows include files marked absent by prior scans.
+    pub fn files_including_absent(&self) -> Result<Vec<MediaFile>> {
+        self.read_files(None, true)
+    }
+    fn read_files(&self, project: Option<&str>, include_absent: bool) -> Result<Vec<MediaFile>> {
+        let mut q=self.conn.prepare("SELECT path,folder,size,modified_ns,metadata FROM files WHERE (present=1 OR ?2) AND (?1 IS NULL OR project=?1) ORDER BY path")?;
+        let rows = q.query_map(params![project, include_absent], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -182,12 +195,19 @@ impl Index {
         let mut out = Vec::new();
         for row in rows {
             let (p, f, size, modified_ns, m) = row?;
+            let mut metadata: MediaMetadata = serde_json::from_str(&m)?;
+            if let Some(ul) = &metadata.codec_ul {
+                let label = mxf::codec_label(ul, metadata.edit_rate.as_ref());
+                if label != "Unknown" {
+                    metadata.codec = Some(label);
+                }
+            }
             out.push(MediaFile {
                 path: p.into(),
                 folder: f.into(),
                 size,
                 modified_ns,
-                metadata: serde_json::from_str(&m)?,
+                metadata,
             });
         }
         Ok(out)
@@ -235,11 +255,11 @@ impl Index {
         let root = root.canonicalize()?;
         ensure!(root.is_dir(), "scan root must be a directory");
         ensure!(
-            !self.path.starts_with(&root),
+            !self.path.starts_with(&root) || root.parent().is_none(),
             "index must be outside the scanned media tree"
         );
         let mut report = ScanReport::default();
-        let disk = discover(&root, &mut report.warnings);
+        let disk = discover_with_cancel(&root, &mut report.warnings, cancel)?;
         let mut folders: BTreeSet<_> = disk
             .iter()
             .filter_map(|p| p.parent().map(Path::to_path_buf))
@@ -250,6 +270,7 @@ impl Index {
             .into_iter()
             .flatten()
         {
+            ensure!(!cancel.is_cancelled(), "scan cancelled");
             if entry.file_type().is_file()
                 && (is_ext(entry.path(), "pmr") || is_ext(entry.path(), "mdb"))
             {
@@ -496,8 +517,16 @@ fn is_ext(p: &Path, ext: &str) -> bool {
 }
 /// Recursion also handles arbitrary MXF folders, nested workspaces, host.N and OMFI layouts.
 pub fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    discover_with_cancel(root, warnings, &CancellationToken::default()).unwrap_or_default()
+}
+fn discover_with_cancel(
+    root: &Path,
+    warnings: &mut Vec<String>,
+    cancel: &CancellationToken,
+) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for e in WalkDir::new(root).follow_links(false) {
+        ensure!(!cancel.is_cancelled(), "scan cancelled");
         match e {
             Ok(e) if e.file_type().is_file() && is_ext(e.path(), "mxf") => {
                 if e.path().to_str().is_some() {
@@ -514,5 +543,5 @@ pub fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out
+    Ok(out)
 }
