@@ -840,6 +840,7 @@ progress {
   background: #202020;
 }
 .poster.placeholder {
+  font-size: 10px;
   display: flex;
   align-items: center;
   justify-content: center;

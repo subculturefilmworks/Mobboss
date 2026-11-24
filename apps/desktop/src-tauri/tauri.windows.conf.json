@@ -1,6 +1,15 @@
 {
   "bundle": {
-    "targets": ["msi"],
-    "windows": { "webviewInstallMode": { "type": "skip" } }
+    "targets": [
+      "msi"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      }
+    },
+    "externalBin": [
+      "binaries/ffmpeg"
+    ]
   }
 }

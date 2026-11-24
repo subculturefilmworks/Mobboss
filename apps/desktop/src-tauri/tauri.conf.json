@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "org.mobboss.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node ../../scripts/fetch-ffmpeg.mjs && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "node ../../scripts/fetch-ffmpeg.mjs && npm run build",
     "frontendDist": "../dist",
     "features": [
       "desktop"
@@ -45,6 +45,10 @@
     "license": "MIT OR Apache-2.0",
     "macOS": {
       "minimumSystemVersion": "10.15"
+    },
+    "resources": {
+      "../../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+      "../../../docs/licenses/": "licenses/"
     }
   }
 }

@@ -120,7 +120,7 @@ Deep scanning is I/O-bound on the tested NAS. Header reads now use a bounded wor
 
 ## Desktop app (Phase 2)
 
-The dark-first UI (with a light theme) provides multiple sources, mounted volumes/shares, Quick/Auto/Deep scans with live progress and cancellation, a virtualized media table, persisted sortable/resizable/hideable columns, multi-selection, full-column search and project/track/codec/folder filters. Projects show counts and sizes and export to CSV/HTML; the current filtered or selected table exports to CSV. Reveal opens Finder/Explorer at a selected file. The Actions menu provides Move, Copy, Collect, and log-based Undo for one selected project or selected indexed rows. Media playback preview and render cleanup remain unavailable.
+The dark-first UI (with a light theme) provides multiple sources, mounted volumes/shares, Quick/Auto/Deep scans with live progress and cancellation, a virtualized media table, persisted sortable/resizable/hideable columns, multi-selection, full-column search and project/track/codec/folder filters. Projects show counts and sizes and export to CSV/HTML; the current filtered or selected table exports to CSV. Reveal opens Finder/Explorer at a selected file. The Actions menu provides Move, Copy, Collect, and log-based Undo for one selected project or selected indexed rows. Clip grouping, thumbnail and playback features are described under Phase 4 below. Render cleanup remains unavailable.
 
 Mounted network shares must already be connected in your operating system. Settings shows the index path (default: local app-data) and lets you choose a different index and header concurrency. The backend rejects indexes and reports inside source/media folders. Whole-drive scanning permits the usual app-data index on that drive, with the same media-directory guards. A different index starts a separate library; it does not copy the old database. Exported CSV quotes fields and neutralizes spreadsheet formulas. Sizes follow Finder on macOS and decimal units on Linux; Windows uses Explorer’s 1024-based KB/MB/GB labels. Hover over sizes for exact bytes; CSV and HTML exports retain exact byte counts. After scanning, each source has an expandable reconciliation of media, Avid databases, other files (up to 200 names), folders and total file bytes within its Avid trees (or the selected folder when no Avid tree is present). Folder counts exclude the selected root; totals are logical file bytes, not allocated disk space. Database details show size, modification time and PMR agreement with disk. Recognized MDB containers are informational; unreadable files, invalid headers and PMR mismatches remain warnings. Durations show `hh:mm:ss.mmm`, calculated from descriptor edit rate; audio duration uses samples.
 
@@ -139,10 +139,37 @@ Rust service logic compiles without the webview by default. `cargo test` and `ca
 
 On Linux, full builds need WebKitGTK 4.1, GTK3, libsoup3 and their development packages, plus the usual Tauri build dependencies. They were initially absent on the dev machine; the final verification notes below record the actual result. Frontend and service tests remain independent of them.
 
+### Clip previews (Phase 4)
+
+Switch **Files | Clips | Grid** above the inventory. Clips group all files with the same material-package UID. Missing UIDs stay separate; equal names never imply a group. Expand a clip to inspect members. Clip checkboxes select every member for Move/Copy/Collect, including members hidden by a file-level filter. Click a clip or its Preview button to open playback. A clip with several video variants currently previews its first video file.
+
+Posters are generated after scans by two background workers, with progress, Cancel and retry. They are 320-pixel JPEGs from about 10% into a clip (frame zero for stills). Decodable alpha is composited on dark grey. The scanner itself remains header-only; preview generation is separate and never writes to media folders. Timecode comes from linked material/source package components; absent timecode displays “—”.
+
+On first play, Mob Boss makes a cached proxy at up to 960 × 540. macOS uses VideoToolbox H.264 and Windows uses Media Foundation H.264, with AAC audio in a fast-start MP4. Encoder or device failures appear in the player; there is no GPL software-encoder fallback in releases. Linux development uses VP8/Opus WebM and requires a suitable `MOBBOSS_FFMPEG`. The first audio track goes to both speakers when mono; two tracks map to left/right. Select different tracks in the player when more are present. Scrub or use **J / K / L** (reverse/pause/forward), **Space**, and arrow keys to step approximately one frame. Timecode follows start TC and the clip edit rate.
+
+Previews live in the application's local app-data `previews/` directory. Keys include file UID, size and modification time; proxies also include audio selection and platform. Settings provides a **5 GB** default limit and **Clear preview cache**. Least recently used completed previews are removed first, while the current player is protected. Asset access is restricted to this cache, with byte ranges supported. WebKitGTK cannot stream the custom scheme directly, so Linux fetches the cached proxy into a browser Blob before playing; macOS/Windows use the asset URL directly. Linux loads the complete small proxy before playback.
+
+HTML project reports have an **Include thumbnails** checkbox, off by default. Reports embed one existing JPEG per clip and include **Print / Save as PDF** using the browser's print dialog. Missing posters are marked unavailable. CSV remains a file-level export.
+
+**Known codec limit:** the sample's DNxUncompressed `rl16` RGBA titles are recognized and grouped, but the checked official/BtbN FFmpeg versions have a DNxUC parser without a decoder. Their thumbnails and playback report unavailable. Real DNxHR video, PCM audio and single-frame stills are tested. Alpha composition is present in the filter graph; rendering these particular titles is not supported. See [preview validation](docs/previews-validation.md) for platform evidence and outstanding checks.
+
+### Bundled LGPL ffmpeg
+
+Mac/Windows builds automatically run [`scripts/fetch-ffmpeg.mjs`](scripts/fetch-ffmpeg.mjs) before building. No separate ffmpeg installation is needed by app users. The script ignores development overrides and system/Homebrew ffmpeg for packaging. It verifies pinned archive SHA-256 values from [`ffmpeg-sources.json`](scripts/ffmpeg-sources.json), checks the resulting native executable's LGPL license and required codecs, and caches results under `target/ffmpeg-cache` and the ignored sidecar directory.
+
+Windows x64 uses a pinned LGPL BtbN/FFmpeg-Builds executable. macOS builds official FFmpeg 8.1.3 source with a minimal LGPL configuration because a trustworthy pinned universal LGPL prebuilt was not selected. Both Apple Silicon and Intel slices are built for universal releases, then joined with `lipo`. The first Mac build needs Xcode command-line tools (`clang`, `make`, `lipo`), `curl`, `tar` and network access; later builds reuse verified binaries. It does not need Homebrew ffmpeg or nasm. These commands still work from `apps/desktop`:
+
+```sh
+npm run tauri build -- --bundles app
+npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
+```
+
+For development on Linux only, set `MOBBOSS_FFMPEG` to an absolute executable path before launching the desktop app or running codec tests. No Linux/system executable is copied into release bundles. Without a bundled binary or this override, inventory and file actions still work and the UI says **Previews unavailable**. Native-only source build and hardware encoder checks still need macOS/Windows validation. See [third-party notices](THIRD-PARTY-NOTICES.md) for exact sources and license texts.
+
 ### Portable builds
 
 ```sh
-# Windows (run in apps/desktop on Windows): primary no-installer executable
+# Windows (run in apps/desktop on Windows): portable app + adjacent ffmpeg.exe
 # Set RUSTFLAGS=-C target-feature=+crt-static for a static C runtime (CI does this).
 # With this flag, specify the target so host build tools keep their normal runtime.
 npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle
@@ -155,11 +182,11 @@ npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
 # target/universal-apple-darwin/release/bundle/{macos,dmg}/
 ```
 
-The Windows executable runs directly without installing Mob Boss; it uses the system **Microsoft Edge WebView2 Runtime**, normally present on Windows 10/11. A machine without that runtime needs it provisioned separately. On older or locked-down Windows machines where WebView2 is missing or disabled, ask your administrator to provision a supported Microsoft Edge WebView2 Runtime before running Mob Boss. The optional MSI is configured to skip runtime installation. Settings and the index still live in app-data, rather than beside the executable or media.
+Download **MobBoss-Windows-portable.zip** from the workflow artifacts and extract the whole ZIP. Keep `MobBoss.exe`, `ffmpeg.exe` and the license notices together; run `MobBoss.exe` from the extracted folder. The Windows executable runs directly without installing Mob Boss; it uses the system **Microsoft Edge WebView2 Runtime**, normally present on Windows 10/11. A machine without that runtime needs it provisioned separately. On older or locked-down Windows machines where WebView2 is missing or disabled, ask your administrator to provision a supported Microsoft Edge WebView2 Runtime before running Mob Boss. The optional MSI is configured to skip runtime installation. Settings and the index still live in app-data, rather than beside the executable or media.
 
 Mac builds are **unsigned and unnotarized** for now. Open the downloaded `.app` by right-clicking it and choosing **Open**, then confirm **Open**. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway after attempting to open it. The `.app` can run from any writable location; no installer is required. The `.dmg` is a distribution container.
 
-[The release workflow](.github/workflows/release.yml) builds the universal Mac `.app`/`.dmg` and the portable Windows `.exe` on a `v*` tag push, then uploads them as workflow artifacts (kept 7 days). It does not publish a GitHub Release. The MSI can still be built locally with the command above. Tauri build flags follow the [Tauri 2 CLI reference](https://v2.tauri.app/reference/cli/).
+[The release workflow](.github/workflows/release.yml) builds the universal Mac `.app`/`.dmg` and the portable Windows ZIP (`MobBoss.exe` + `ffmpeg.exe` + notices) on a `v*` tag push, then uploads them as workflow artifacts (kept 7 days). It does not publish a GitHub Release. The MSI can still be built locally with the command above. Tauri build flags follow the [Tauri 2 CLI reference](https://v2.tauri.app/reference/cli/).
 
 ### Progressive scan API
 

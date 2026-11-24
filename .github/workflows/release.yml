@@ -4,6 +4,7 @@ on:
     tags: ['v*']
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -30,6 +31,21 @@ jobs:
         working-directory: apps/desktop
       - run: npm test
         working-directory: apps/desktop
+      - name: Cache verified ffmpeg sources and sidecars
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/ffmpeg-cache
+            apps/desktop/src-tauri/binaries
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.mjs', 'scripts/ffmpeg-sources.json') }}
+      - name: Prepare LGPL ffmpeg sidecar
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            node scripts/fetch-ffmpeg.mjs --target universal-apple-darwin
+          else
+            node scripts/fetch-ffmpeg.mjs --target x86_64-pc-windows-msvc
+          fi
       - name: Build unsigned universal Mac app and disk image
         if: runner.os == 'macOS'
         run: npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
@@ -43,6 +59,31 @@ jobs:
       - name: Archive app bundle preserving permissions and symlinks
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app' 'target/MobBoss-macOS-universal.app.zip'
+      - name: Stage portable Windows zip contents and report sizes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = 'target/MobBoss-Windows-portable'
+          New-Item -ItemType Directory -Path "$stage/licenses" -Force | Out-Null
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/MobBoss.exe' "$stage/MobBoss.exe"
+          Copy-Item 'apps/desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe' "$stage/ffmpeg.exe"
+          Copy-Item 'THIRD-PARTY-NOTICES.md' "$stage/THIRD-PARTY-NOTICES.md"
+          Copy-Item 'docs/licenses/*' "$stage/licenses/"
+          Copy-Item 'apps/desktop/src-tauri/binaries/FFmpeg-Windows-LICENSE.txt' "$stage/licenses/"
+          Get-ChildItem "$stage/*.exe" | Select-Object Name,Length | Format-Table
+          "### Windows bundle sizes (bytes)" >> $env:GITHUB_STEP_SUMMARY
+          Get-ChildItem "$stage/*.exe" | ForEach-Object { "- $($_.Name): $($_.Length)" >> $env:GITHUB_STEP_SUMMARY }
+      - name: Report macOS bundle sizes
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          du -sk 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app'
+          stat -f '%N: %z bytes' target/MobBoss-macOS-universal.app.zip target/universal-apple-darwin/release/bundle/dmg/*.dmg apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin
+          {
+            echo '### macOS bundle sizes'
+            du -sk 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app'
+            stat -f '%N: %z bytes' target/MobBoss-macOS-universal.app.zip target/universal-apple-darwin/release/bundle/dmg/*.dmg apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'
         with:
@@ -53,9 +94,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - uses: actions/upload-artifact@v4
+        id: windows_portable
         if: runner.os == 'Windows'
         with:
           name: MobBoss-Windows-portable
-          path: target/x86_64-pc-windows-msvc/release/MobBoss.exe
+          # upload-artifact produces the portable ZIP directly: no nested archive.
+          path: target/MobBoss-Windows-portable/
           if-no-files-found: error
           retention-days: 7
+      - name: Report actual portable ZIP size
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifact = await github.rest.actions.getArtifact({
+              ...context.repo,
+              artifact_id: Number('${{ steps.windows_portable.outputs.artifact-id }}')
+            });
+            await core.summary.addRaw(`Portable Windows ZIP: ${artifact.data.size_in_bytes} bytes`).write();

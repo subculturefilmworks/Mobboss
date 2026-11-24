@@ -120,7 +120,7 @@ export function Poster({
       aria-label={error ? "Preview unavailable" : "No thumbnail"}
       title={error ? `Preview unavailable: ${error}` : "No thumbnail"}
     >
-      ▶
+      {error ? "Unavailable" : "No preview"}
     </span>
   );
 }

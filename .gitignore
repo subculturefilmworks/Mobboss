@@ -9,3 +9,6 @@ Thumbs.db
 .vscode/
 **/*.tsbuildinfo
 /apps/desktop/src-tauri/gen/
+
+# Verified sidecars are generated locally/CI, never committed.
+/apps/desktop/src-tauri/binaries/
