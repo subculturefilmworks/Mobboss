@@ -46,7 +46,7 @@ jobs:
           else
             node scripts/fetch-ffmpeg.mjs --target x86_64-pc-windows-msvc
           fi
-      - name: Smoke test bundled thumbnail and stereo proxy generation
+      - name: Smoke test bundled posters and stereo proxies (Windows WebM fallback required)
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then

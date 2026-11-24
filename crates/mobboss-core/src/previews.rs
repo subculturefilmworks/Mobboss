@@ -426,6 +426,7 @@ mod tests {
 pub enum ProxyPlatform {
     Mac,
     Windows,
+    WindowsWebm,
     Linux,
 }
 impl ProxyPlatform {
@@ -438,8 +439,18 @@ impl ProxyPlatform {
             Self::Linux
         }
     }
+    pub fn is_webm(self) -> bool {
+        matches!(self, Self::Linux | Self::WindowsWebm)
+    }
+    pub fn encoder(self) -> &'static str {
+        match self {
+            Self::Mac => "h264_videotoolbox",
+            Self::Windows => "h264_mf",
+            Self::WindowsWebm | Self::Linux => "libvpx",
+        }
+    }
     pub fn extension(self) -> &'static str {
-        if self == Self::Linux {
+        if self.is_webm() {
             "webm"
         } else {
             "mp4"
@@ -556,17 +567,13 @@ pub fn proxy_args(
             "-map",
             "[v]",
             "-c:v",
-            match platform {
-                ProxyPlatform::Mac => "h264_videotoolbox",
-                ProxyPlatform::Windows => "h264_mf",
-                ProxyPlatform::Linux => "libvpx",
-            },
+            platform.encoder(),
             "-b:v",
             "1800k",
             "-pix_fmt",
             "yuv420p",
         ]));
-        if platform == ProxyPlatform::Linux {
+        if platform.is_webm() {
             args.extend(strings(&["-deadline", "realtime", "-cpu-used", "4"]));
         }
         if platform == ProxyPlatform::Windows {
@@ -578,11 +585,7 @@ pub fn proxy_args(
             "-map",
             "[a]",
             "-c:a",
-            if platform == ProxyPlatform::Linux {
-                "libopus"
-            } else {
-                "aac"
-            },
+            if platform.is_webm() { "libopus" } else { "aac" },
             "-b:a",
             "128k",
             "-ar",
@@ -597,19 +600,158 @@ pub fn proxy_args(
         "Unknown clip duration; rescan headers"
     );
     args.extend(strings(&["-t", &format!("{duration:.6}"), "-threads", "2"]));
-    if platform != ProxyPlatform::Linux {
+    if !platform.is_webm() {
         args.extend(strings(&["-movflags", "+faststart"]));
     }
     args.extend(strings(&[
         "-f",
-        if platform == ProxyPlatform::Linux {
-            "webm"
-        } else {
-            "mp4"
-        },
+        if platform.is_webm() { "webm" } else { "mp4" },
     ]));
     args.push(output.as_os_str().into());
     Ok(args)
+}
+#[derive(Serialize)]
+pub struct ProxyOutput {
+    pub path: PathBuf,
+    pub encoder: &'static str,
+}
+/// Only retry encoder initialization, never corrupt inputs, disk errors or cancellation.
+pub fn mf_encoder_open_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("h264_mf")
+        && [
+            "could not find any mft",
+            "error while opening encoder",
+            "unknown encoder 'h264_mf'",
+        ]
+        .iter()
+        .any(|message| text.contains(message))
+}
+fn encoder_choice_key(ffmpeg: &Ffmpeg) -> Result<String> {
+    let stat = fs::metadata(&ffmpeg.binary)?;
+    Ok(blake3::hash(
+        format!(
+            "{}:{}:{:?}",
+            ffmpeg.binary.display(),
+            stat.len(),
+            stat.modified()?
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string())
+}
+impl PreviewCache {
+    /// Persist only a binary fingerprint and container, never machine names or source paths.
+    fn windows_choice(&self, ffmpeg: &Ffmpeg) -> ProxyPlatform {
+        let path = self.root.join("windows-encoder.txt");
+        if fs::symlink_metadata(&path).is_ok_and(|s| s.is_file() && s.len() < 128) {
+            if let (Ok(key), Ok(choice)) = (encoder_choice_key(ffmpeg), fs::read_to_string(path)) {
+                if choice == format!("{key}\nwebm\n") {
+                    return ProxyPlatform::WindowsWebm;
+                }
+            }
+        }
+        ProxyPlatform::Windows
+    }
+    fn remember_windows_choice(&self, ffmpeg: &Ffmpeg, profile: ProxyPlatform) -> Result<()> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let temp = self.root.join(format!(
+            ".windows-encoder-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let result = (|| {
+            use std::io::Write;
+            writeln!(
+                output,
+                "{}\n{}",
+                encoder_choice_key(ffmpeg)?,
+                profile.extension()
+            )?;
+            drop(output);
+            fs::rename(&temp, self.root.join("windows-encoder.txt"))?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(temp);
+        result
+    }
+    fn with_fallback(
+        &self,
+        ffmpeg: &Ffmpeg,
+        platform: ProxyPlatform,
+        video: bool,
+        cancel: &CancellationToken,
+        mut run: impl FnMut(ProxyPlatform) -> Result<PathBuf>,
+    ) -> Result<ProxyOutput> {
+        ensure!(!cancel.is_cancelled(), "Preview cancelled");
+        let mut profile = if platform == ProxyPlatform::Windows {
+            self.windows_choice(ffmpeg)
+        } else {
+            platform
+        };
+        let path = match run(profile) {
+            Ok(path) => path,
+            Err(error)
+                if profile == ProxyPlatform::Windows
+                    && video
+                    && !cancel.is_cancelled()
+                    && mf_encoder_open_error(&error) =>
+            {
+                profile = ProxyPlatform::WindowsWebm;
+                eprintln!(
+                    "Windows preview: h264_mf unavailable; retrying libvpx/Opus WebM ({error})"
+                );
+                run(profile).map_err(|fallback| {
+                    anyhow::anyhow!(
+                        "H.264 encoder unavailable ({error}); WebM fallback failed: {fallback}"
+                    )
+                })?
+            }
+            Err(error) => return Err(error),
+        };
+        ensure!(!cancel.is_cancelled(), "Preview cancelled");
+        if platform == ProxyPlatform::Windows && video {
+            let _ = self.remember_windows_choice(ffmpeg, profile);
+        }
+        Ok(ProxyOutput {
+            path,
+            encoder: if profile.is_webm() {
+                if video {
+                    "libvpx (VP8) · WebM"
+                } else {
+                    "libopus · WebM"
+                }
+            } else if !video {
+                "aac · MP4"
+            } else if profile == ProxyPlatform::Mac {
+                "h264_videotoolbox · MP4"
+            } else {
+                "h264_mf · MP4"
+            },
+        })
+    }
+    pub fn proxy_with_fallback(
+        &self,
+        ffmpeg: &Ffmpeg,
+        clip: &Clip,
+        tracks: &[usize],
+        platform: ProxyPlatform,
+        cancel: &CancellationToken,
+        mut progress: impl FnMut(f64),
+    ) -> Result<ProxyOutput> {
+        let video = clip
+            .files
+            .iter()
+            .any(|f| f.metadata.track_kind.as_deref() == Some("video"));
+        self.with_fallback(ffmpeg, platform, video, cancel, |profile| {
+            self.proxy(ffmpeg, clip, tracks, profile, cancel, &mut progress)
+        })
+    }
 }
 impl PreviewCache {
     pub fn proxy(
@@ -794,6 +936,7 @@ mod proxy_tests {
             (ProxyPlatform::Mac, "h264_videotoolbox"),
             (ProxyPlatform::Windows, "h264_mf"),
             (ProxyPlatform::Linux, "libvpx"),
+            (ProxyPlatform::WindowsWebm, "libvpx"),
         ] {
             let args = proxy_args(&clip, &[0, 1], platform, out).unwrap();
             assert!(args.iter().any(|s| s == encoder));
@@ -805,11 +948,16 @@ mod proxy_tests {
             assert!(graph.contains("[1:a:0]"));
             assert!(graph.contains("[2:a:0]"));
             assert!(graph.contains("c1=c1"));
-            assert_eq!(
-                args.iter().any(|s| s == "+faststart"),
-                platform != ProxyPlatform::Linux
-            );
+            assert_eq!(args.iter().any(|s| s == "+faststart"), !platform.is_webm());
         }
+        assert_ne!(
+            proxy_key(&clip, &[0], ProxyPlatform::Windows).unwrap(),
+            proxy_key(&clip, &[0], ProxyPlatform::WindowsWebm).unwrap()
+        );
+        let webm = proxy_args(&clip, &[0], ProxyPlatform::WindowsWebm, out).unwrap();
+        assert!(webm.iter().any(|s| s == "libopus"));
+        assert!(!webm.iter().any(|s| s == "-hw_encoding"));
+        assert_eq!(ProxyPlatform::WindowsWebm.extension(), "webm");
         let mono = proxy_args(&clip, &[0], ProxyPlatform::Mac, out).unwrap();
         assert!(mono.iter().any(|s| s.to_string_lossy().contains("c1=c0")));
         assert_ne!(
@@ -818,6 +966,119 @@ mod proxy_tests {
         );
         assert!(proxy_args(&clip, &[3], ProxyPlatform::Mac, out).is_err());
         assert!(proxy_args(&clip, &[0, 0], ProxyPlatform::Mac, out).is_err());
+    }
+    #[test]
+    fn windows_fallback_is_remembered_and_invalidated_with_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = Ffmpeg {
+            binary: dir.path().join("ffmpeg"),
+        };
+        fs::write(&ffmpeg.binary, "binary-v1").unwrap();
+        let cache = PreviewCache::open(&dir.path().join("previews")).unwrap();
+        let token = CancellationToken::default();
+        let mut attempts = Vec::new();
+        let result = cache
+            .with_fallback(&ffmpeg, ProxyPlatform::Windows, true, &token, |profile| {
+                attempts.push(profile);
+                if profile == ProxyPlatform::Windows {
+                    anyhow::bail!("h264_mf: could not find any MFT for the given media type");
+                }
+                Ok(cache.root.join("fallback.webm"))
+            })
+            .unwrap();
+        assert_eq!(
+            attempts,
+            [ProxyPlatform::Windows, ProxyPlatform::WindowsWebm]
+        );
+        assert!(result.encoder.contains("libvpx"));
+        let reopened = PreviewCache::open(&cache.root).unwrap();
+        reopened.clear().unwrap();
+        reopened
+            .with_fallback(&ffmpeg, ProxyPlatform::Windows, true, &token, |profile| {
+                assert_eq!(profile, ProxyPlatform::WindowsWebm);
+                Ok(reopened.root.join("another.webm"))
+            })
+            .unwrap();
+        fs::write(&ffmpeg.binary, "replacement-binary-v2").unwrap();
+        let result = reopened
+            .with_fallback(&ffmpeg, ProxyPlatform::Windows, true, &token, |profile| {
+                assert_eq!(profile, ProxyPlatform::Windows);
+                Ok(reopened.root.join("native.mp4"))
+            })
+            .unwrap();
+        assert!(result.encoder.contains("h264_mf"));
+    }
+    #[test]
+    fn windows_retry_does_not_hide_other_errors_or_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(dir.path()).unwrap();
+        let ffmpeg = Ffmpeg {
+            binary: dir.path().join("unused"),
+        };
+        for message in [
+            "No space left on device",
+            "Invalid input data",
+            "h264_mf: error writing output",
+            "h264_mf: could not initialize filter graph",
+            "h264_mf configured; Unknown encoder 'aac'",
+        ] {
+            let mut calls = 0;
+            assert!(cache
+                .with_fallback(
+                    &ffmpeg,
+                    ProxyPlatform::Windows,
+                    true,
+                    &CancellationToken::default(),
+                    |_| {
+                        calls += 1;
+                        anyhow::bail!("{message}")
+                    }
+                )
+                .is_err());
+            assert_eq!(calls, 1);
+        }
+        let token = CancellationToken::default();
+        let mut calls = 0;
+        assert!(cache
+            .with_fallback(&ffmpeg, ProxyPlatform::Windows, true, &token, |_| {
+                calls += 1;
+                token.cancel();
+                anyhow::bail!("h264_mf: Error while opening encoder")
+            })
+            .is_err());
+        assert_eq!(calls, 1);
+    }
+    #[test]
+    fn failed_fallback_is_not_remembered_and_macos_never_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(dir.path()).unwrap();
+        let ffmpeg = Ffmpeg {
+            binary: dir.path().join("ffmpeg"),
+        };
+        fs::write(&ffmpeg.binary, "binary").unwrap();
+        let token = CancellationToken::default();
+        let mut calls = 0;
+        let error = cache
+            .with_fallback(&ffmpeg, ProxyPlatform::Windows, true, &token, |_| {
+                calls += 1;
+                if calls == 1 {
+                    anyhow::bail!("h264_mf: Error while opening encoder");
+                }
+                anyhow::bail!("fallback disk error")
+            })
+            .err()
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert!(error.to_string().contains("fallback disk error"));
+        assert_eq!(cache.windows_choice(&ffmpeg), ProxyPlatform::Windows);
+        calls = 0;
+        assert!(cache
+            .with_fallback(&ffmpeg, ProxyPlatform::Mac, true, &token, |_| {
+                calls += 1;
+                anyhow::bail!("h264_mf: Error while opening encoder")
+            })
+            .is_err());
+        assert_eq!(calls, 1);
     }
     #[test]
     fn orphan_partials_are_cleaned_but_live_jobs_are_preserved() {

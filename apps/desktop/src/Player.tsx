@@ -44,6 +44,7 @@ export default function Player({
     [length, setLength] = useState(0),
     [playing, setPlaying] = useState(false);
   const [source, setSource] = useState("");
+  const [encoder, setEncoder] = useState("");
   const video = useRef<HTMLVideoElement>(null),
     job = useRef(""),
     reverse = useRef<number | undefined>(undefined),
@@ -80,6 +81,7 @@ export default function Player({
     setPlaying(false);
     setPath("");
     setSource("");
+    setEncoder("");
     setError("");
     setFraction(0);
     setPosition(0);
@@ -99,11 +101,15 @@ export default function Player({
         unlisten();
         return;
       }
-      const path = await invoke<string>("prepare_proxy", {
-        clipId: clip.id,
-        tracks: audio.length ? (right >= 0 ? [left, right] : [left]) : [],
-        requestId,
-      });
+      const preview = await invoke<{ path: string; encoder: string }>(
+        "prepare_proxy",
+        {
+          clipId: clip.id,
+          tracks: audio.length ? (right >= 0 ? [left, right] : [left]) : [],
+          requestId,
+        },
+      );
+      const path = preview.path;
       let source = convertFileSrc(path);
       // WebKitGTK delegates media fetching to GStreamer, which cannot read Tauri's
       // custom URI scheme. Fetch from the scoped asset protocol into a browser Blob;
@@ -117,6 +123,7 @@ export default function Player({
       }
       if (!disposed) {
         setSource(source);
+        setEncoder(preview.encoder);
         setPath(path);
         setFraction(1);
         setBusy(false);
@@ -214,6 +221,9 @@ export default function Player({
             <small>
               {clip.tracks} · {clip.metadata.project || "Unknown"}
             </small>
+            {encoder && (
+              <small style={{ display: "block" }}>Preview: {encoder}</small>
+            )}
           </div>
           <button onClick={onClose} aria-label="Close player">
             Close

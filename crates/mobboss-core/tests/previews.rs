@@ -127,14 +127,16 @@ fn copied_sample_previews() -> anyhow::Result<()> {
                 .any(|f| f.metadata.track_kind.as_deref() == Some("audio"))
         })
         .unwrap();
-    let proxy = cache.proxy(
-        &ffmpeg,
-        &clip,
-        &[0],
-        mobboss_core::previews::ProxyPlatform::current(),
-        &token,
-        |_| {},
-    )?;
+    let proxy = cache
+        .proxy_with_fallback(
+            &ffmpeg,
+            &clip,
+            &[0],
+            mobboss_core::previews::ProxyPlatform::current(),
+            &token,
+            |_| {},
+        )?
+        .path;
     assert!(fs::metadata(&proxy)?.len() > 1000);
     let probe = ffmpeg.binary.with_file_name(if cfg!(windows) {
         "ffprobe.exe"

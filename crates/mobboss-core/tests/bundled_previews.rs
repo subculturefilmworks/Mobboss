@@ -89,35 +89,89 @@ fn bundled_previews() -> Result<()> {
     let clip = clips::group(vec![video, audio, right]).remove(0);
     // Exercise mono duplication and two-track merging with the real native encoders.
     let platform = ProxyPlatform::current();
-    for tracks in [&[0][..], &[0, 1][..]] {
-        let proxy = cache.proxy(&ffmpeg, &clip, tracks, platform, &cancel, |_| {})?;
-        let encoded = fs::read(proxy)?;
-        ensure!(encoded.len() > 1000, "proxy is empty");
-        if platform != ProxyPlatform::Linux {
-            let mut entries = Vec::new();
-            sample_entries(&encoded, &mut entries)?;
-            ensure!(
-                entries.iter().any(|(kind, _)| kind == b"avc1"),
-                "expected H.264 MP4 video"
-            );
-            let (_, aac) = entries
-                .iter()
-                .find(|(kind, _)| kind == b"mp4a")
-                .context("expected AAC MP4 audio")?;
-            ensure!(
-                aac.len() >= 28 && u16::from_be_bytes(aac[24..26].try_into()?) == 2,
-                "expected two-channel AAC"
-            );
-            let position = |name: &[u8]| encoded.windows(4).position(|b| b == name);
-            ensure!(
-                position(b"moov") < position(b"mdat"),
-                "expected faststart MP4"
+    let profiles = if platform == ProxyPlatform::Windows {
+        eprintln!(
+            "Windows gate: mandatory VP8/Opus WebM, then optional h264_mf initialization probe"
+        );
+        vec![ProxyPlatform::WindowsWebm, ProxyPlatform::Windows]
+    } else if platform == ProxyPlatform::Mac {
+        vec![platform]
+    } else {
+        // The Windows software profile also runs on Linux development ffmpeg.
+        vec![ProxyPlatform::WindowsWebm]
+    };
+    for profile in profiles {
+        for tracks in [&[0][..], &[0, 1][..]] {
+            let preview =
+                cache.proxy_with_fallback(&ffmpeg, &clip, tracks, profile, &cancel, |_| {})?;
+            if profile != ProxyPlatform::Windows {
+                ensure!(
+                    preview
+                        .path
+                        .extension()
+                        .is_some_and(|e| e == profile.extension()),
+                    "unexpected proxy container for {profile:?}"
+                );
+            }
+            let encoded = fs::read(&preview.path)?;
+            ensure!(encoded.len() > 1000, "proxy is empty");
+            if preview.path.extension().is_some_and(|e| e == "mp4") {
+                let mut entries = Vec::new();
+                sample_entries(&encoded, &mut entries)?;
+                ensure!(
+                    entries.iter().any(|(kind, _)| kind == b"avc1"),
+                    "expected H.264 MP4 video"
+                );
+                let (_, aac) = entries
+                    .iter()
+                    .find(|(kind, _)| kind == b"mp4a")
+                    .context("expected AAC MP4 audio")?;
+                ensure!(
+                    aac.len() >= 28 && u16::from_be_bytes(aac[24..26].try_into()?) == 2,
+                    "expected two-channel AAC"
+                );
+                let position = |name: &[u8]| encoded.windows(4).position(|b| b == name);
+                ensure!(
+                    position(b"moov") < position(b"mdat"),
+                    "expected faststart MP4"
+                );
+            } else {
+                ensure!(
+                    encoded.windows(5).any(|b| b == b"V_VP8"),
+                    "expected VP8 WebM video"
+                );
+                let opus = encoded
+                    .windows(8)
+                    .position(|b| b == b"OpusHead")
+                    .context("expected Opus WebM audio")?;
+                ensure!(
+                    encoded.get(opus + 9) == Some(&2),
+                    "expected two-channel Opus"
+                );
+                // Decode the complete proxy, not just its headers. Windows's full LGPL
+                // sidecar includes the null muxer; the minimal Mac gate stays unchanged.
+                ffmpeg.run(
+                    &[
+                        "-i".into(),
+                        preview.path.as_os_str().into(),
+                        "-map".into(),
+                        "0:v:0".into(),
+                        "-map".into(),
+                        "0:a:0".into(),
+                        "-f".into(),
+                        "null".into(),
+                        "-".into(),
+                    ],
+                    &cancel,
+                    |_| {},
+                )?;
+            }
+            eprintln!(
+                "Synthetic thumbnail and {} proxy tracks {tracks:?} passed ({} bytes)",
+                preview.encoder,
+                encoded.len()
             );
         }
-        eprintln!(
-            "Synthetic thumbnail and {platform:?} proxy tracks {tracks:?} passed ({} bytes)",
-            encoded.len()
-        );
     }
     Ok(())
 }
