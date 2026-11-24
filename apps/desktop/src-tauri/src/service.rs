@@ -105,8 +105,37 @@ pub struct Volume {
 pub fn volumes() -> Vec<Volume> {
     sysinfo::Disks::new_with_refreshed_list()
         .iter()
+        .filter(|d| {
+            let mount = d.mount_point().to_string_lossy();
+            let name = d.name().to_string_lossy();
+            let filesystem = d.file_system().to_string_lossy();
+            !["/proc", "/sys", "/run", "/snap", "/dev"]
+                .iter()
+                .any(|p| mount == *p || mount.starts_with(&format!("{p}/")))
+                && !["systemd-1", "tmpfs", "overlay"].contains(&name.as_ref())
+                && !name.starts_with("/dev/mapper")
+                && !["tmpfs", "overlay", "squashfs", "proc", "sysfs", "devtmpfs"]
+                    .contains(&filesystem.as_ref())
+        })
         .map(|d| Volume {
-            name: d.name().to_string_lossy().into(),
+            name: if cfg!(target_os = "windows") {
+                format!(
+                    "{} {}",
+                    d.mount_point().display(),
+                    d.name().to_string_lossy()
+                )
+            } else if d.mount_point().starts_with("/Volumes") {
+                d.mount_point()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                d.mount_point()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "System volume".into())
+            },
             path: d.mount_point().into(),
             available: d.available_space(),
             total: d.total_space(),

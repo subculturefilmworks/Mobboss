@@ -212,6 +212,36 @@ impl Index {
         }
         Ok(out)
     }
+    /// Persist a verified media transfer without rescanning headers.
+    pub fn record_transfer(
+        &mut self,
+        original: &MediaFile,
+        source: &Path,
+        dest: &Path,
+        moved: bool,
+    ) -> Result<()> {
+        let stat = fs::metadata(dest)?;
+        let folder = dest.parent().context("no destination parent")?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO folders(path) VALUES(?1)",
+            [folder.to_string_lossy()],
+        )?;
+        tx.execute("INSERT INTO files(path,folder,size,modified_ns,project,metadata,present) VALUES(?1,?2,?3,?4,?5,?6,1) ON CONFLICT(path) DO UPDATE SET folder=excluded.folder,size=excluded.size,modified_ns=excluded.modified_ns,project=excluded.project,metadata=excluded.metadata,present=1", params![dest.to_string_lossy(), folder.to_string_lossy(), stat.len(), crate::ops::stamp(&stat), original.metadata.project, serde_json::to_string(&original.metadata)?])?;
+        if moved {
+            tx.execute(
+                "DELETE FROM files WHERE path=?1",
+                [source.to_string_lossy()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn forget_path(&mut self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM files WHERE path=?1", [path.to_string_lossy()])?;
+        Ok(())
+    }
     pub fn projects(&self) -> Result<BTreeMap<String, usize>> {
         let mut out = BTreeMap::new();
         for f in self.files(None)? {

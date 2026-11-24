@@ -5,6 +5,8 @@ use tauri::{Emitter, Manager, State};
 struct AppState {
     settings: Mutex<Settings>,
     active: Mutex<Option<CancellationToken>>,
+    planned: Mutex<Option<mobboss_core::plan::Plan>>,
+    undo_log: Mutex<Option<PathBuf>>,
 }
 type Reply<T> = Result<T, String>;
 fn err(e: impl std::fmt::Display) -> String {
@@ -82,6 +84,144 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
     Ok(())
 }
 #[tauri::command]
+async fn plan_operation(
+    op: mobboss_core::plan::Operation,
+    project: String,
+    paths: Vec<PathBuf>,
+    destination: Option<PathBuf>,
+    app: tauri::AppHandle,
+) -> Reply<mobboss_core::plan::Plan> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let active = state.active.lock().map_err(err)?;
+        if active.is_some() {
+            return Err("Wait for the current operation".into());
+        }
+        let settings = state.settings.lock().map_err(err)?.clone();
+        let index = mobboss_core::Index::open(&settings.index).map_err(err)?;
+        let plan = mobboss_core::ops::prepare(&index, op, &project, &paths, destination.as_deref())
+            .map_err(err)?;
+        *state.planned.lock().map_err(err)? = Some(plan.clone());
+        Ok(plan)
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
+async fn plan_undo(path: PathBuf, app: tauri::AppHandle) -> Reply<mobboss_core::ops::UndoPreview> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let active = state.active.lock().map_err(err)?;
+        if active.is_some() {
+            return Err("Wait for the current operation".into());
+        }
+        let settings = state.settings.lock().map_err(err)?.clone();
+        let index = mobboss_core::Index::open(&settings.index).map_err(err)?;
+        let preview = mobboss_core::ops::preview_undo(&index, &path).map_err(err)?;
+        *state.undo_log.lock().map_err(err)? = Some(path);
+        Ok(preview)
+    })
+    .await
+    .map_err(err)?
+}
+#[tauri::command]
+fn start_operation(
+    confirmed: bool,
+    undo: bool,
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Reply<()> {
+    if !confirmed {
+        return Err("Explicit confirmation required".into());
+    }
+    let mut active = state.active.lock().map_err(err)?;
+    if active.is_some() {
+        return Err("An operation is already running".into());
+    }
+    let settings = state.settings.lock().map_err(err)?.clone();
+    let plan = if undo {
+        None
+    } else {
+        Some(
+            state
+                .planned
+                .lock()
+                .map_err(err)?
+                .take()
+                .ok_or("Preview a plan first")?,
+        )
+    };
+    let log = if undo {
+        Some(
+            state
+                .undo_log
+                .lock()
+                .map_err(err)?
+                .take()
+                .ok_or("Preview an undo log first")?,
+        )
+    } else {
+        None
+    };
+    let token = CancellationToken::default();
+    *active = Some(token.clone());
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<mobboss_core::ops::Outcome> {
+            let mut index = mobboss_core::Index::open(&settings.index)?;
+            let data = mobboss_core::default_index()?
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let progress = |p| {
+                let _ = app.emit("operation-progress", p);
+            };
+            if let Some(log) = log {
+                mobboss_core::ops::undo(&mut index, &log, &data, &token, progress)
+            } else {
+                mobboss_core::ops::execute(
+                    &mut index,
+                    plan.as_ref().unwrap(),
+                    &data,
+                    &token,
+                    progress,
+                )
+            }
+        })()
+        .map_err(err);
+        if let Ok(mut active) = app.state::<AppState>().active.lock() {
+            *active = None;
+        }
+        let _ = app.emit("operation-finished", &result);
+    });
+    Ok(())
+}
+#[tauri::command]
+fn reveal_log(path: PathBuf) -> Reply<()> {
+    if !path
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("collect-log-"))
+        || path.extension().is_none_or(|e| e != "csv")
+    {
+        return Err("Choose an operation log".into());
+    }
+    mobboss_core::ops::read_log(&path).map_err(err)?;
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .status();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer.exe")
+        .arg(path.parent().ok_or("no log parent")?)
+        .status();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open")
+        .arg(path.parent().ok_or("no log parent")?)
+        .status();
+    result.map_err(err)?;
+    Ok(())
+}
+#[tauri::command]
 fn export_report(path: PathBuf, content: String, state: State<AppState>) -> Reply<()> {
     let settings = state.settings.lock().map_err(err)?;
     service::export(&path, &content, &settings.roots, &settings.index).map_err(err)
@@ -97,6 +237,8 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(Settings::load()?),
                 active: Mutex::new(None),
+                planned: Mutex::new(None),
+                undo_log: Mutex::new(None),
             });
             Ok(())
         })
@@ -107,6 +249,10 @@ pub fn run() {
             missing_files,
             volumes,
             start_scan,
+            plan_operation,
+            plan_undo,
+            start_operation,
+            reveal_log,
             cancel,
             export_report,
             reveal

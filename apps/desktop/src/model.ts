@@ -270,3 +270,13 @@ export function diffRows(
       ),
   ];
 }
+
+/** Unknown source layouts must never imply the system volume as a destination. */
+export function requiresDestination(files: MediaFile[]): boolean {
+  return files.some(
+    (f) =>
+      !f.path
+        .split(/[\\/]/)
+        .some((part) => part.toLowerCase() === "avid mediafiles"),
+  );
+}

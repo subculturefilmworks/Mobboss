@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   bytes,
+  requiresDestination,
   duration,
   filter,
   row,
@@ -129,4 +130,18 @@ it("retains indexed project and size for a missing diff row", () => {
   );
   expect(rows[0].values.project).toBe("Archive");
   expect(rows[0].values.size).toBe(4096);
+});
+
+describe("operation destination requirements", () => {
+  it("requires an explicit root for unknown layouts on Unix, Windows, or mixed selections", () => {
+    const unix = file("/Volumes/Drive/Avid MediaFiles/MXF/1/a.mxf", "Film");
+    const windows = file("D:\\Avid MediaFiles\\MXF\\1\\a.mxf", "Film");
+    const arbitrary = file("/System/Volumes/Data/editorial/a.mxf", "Film");
+    expect(requiresDestination([unix, windows])).toBe(false);
+    expect(requiresDestination([arbitrary])).toBe(true);
+    expect(requiresDestination([unix, arbitrary])).toBe(true);
+    expect(requiresDestination([file("D:\\editorial\\a.mxf", "Film")])).toBe(
+      true,
+    );
+  });
 });
