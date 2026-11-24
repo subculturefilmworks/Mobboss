@@ -129,6 +129,102 @@ fn date(b: &[u8]) -> Option<String> {
 fn field(s: &Set, t: u16) -> Option<&[u8]> {
     s.fields.get(&t).map(Vec::as_slice)
 }
+fn refs(b: &[u8]) -> Vec<&[u8]> {
+    if b.len() < 8 || number(&b[4..8]) != Some(16) {
+        return vec![];
+    }
+    let n = number(&b[..4]).unwrap_or(0) as usize;
+    if n > (b.len() - 8) / 16 {
+        return vec![];
+    }
+    b[8..8 + n * 16]
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|v| v.as_slice())
+        .collect()
+}
+fn referenced<'a>(sets: &'a [Set], id: &[u8]) -> Option<&'a Set> {
+    sets.iter().find(|s| field(s, 0x3c0a) == Some(id))
+}
+fn tracks<'a>(package: &Set, sets: &'a [Set]) -> Vec<&'a Set> {
+    field(package, 0x4403)
+        .map(refs)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| referenced(sets, id))
+        .collect()
+}
+fn components<'a>(track: &Set, sets: &'a [Set]) -> Vec<&'a Set> {
+    field(track, 0x4803)
+        .and_then(|id| referenced(sets, id))
+        .and_then(|seq| field(seq, 0x1001))
+        .map(refs)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| referenced(sets, id))
+        .collect()
+}
+// A material package may reference a file package which references an original
+// source package's timecode. Resolve only that graph; unrelated TC sets are ignored.
+fn package_timecode(
+    package: &Set,
+    sets: &[Set],
+    depth: usize,
+) -> Option<(i64, u16, bool, Rational)> {
+    if depth > 8 {
+        return None;
+    }
+    let ts = tracks(package, sets);
+    for t in &ts {
+        for c in components(t, sets) {
+            if c.key.ends_with("011400") {
+                let start = i64::from_be_bytes(field(c, 0x1501)?.try_into().ok()?);
+                let fps = u16::from_be_bytes(field(c, 0x1502)?.try_into().ok()?);
+                if fps == 0 {
+                    continue;
+                }
+                return Some((
+                    start,
+                    fps,
+                    field(c, 0x1503)
+                        .and_then(|v| v.first())
+                        .is_some_and(|v| *v != 0),
+                    field(t, 0x4b01).and_then(rate).unwrap_or(Rational {
+                        numerator: i32::from(fps),
+                        denominator: 1,
+                    }),
+                ));
+            }
+        }
+    }
+    for t in ts {
+        for c in components(t, sets) {
+            let Some(uid) = field(c, 0x1101) else {
+                continue;
+            };
+            if let Some(source) = sets
+                .iter()
+                .find(|s| s.key.ends_with("013700") && field(s, 0x4401) == Some(uid))
+            {
+                if let Some((start, fps, drop, tc_rate)) = package_timecode(source, sets, depth + 1)
+                {
+                    let offset = field(c, 0x1201)
+                        .and_then(|v| v.try_into().ok().map(i64::from_be_bytes))
+                        .unwrap_or(0);
+                    let r = field(t, 0x4b01).and_then(rate)?;
+                    let frames =
+                        (offset as f64 * f64::from(r.denominator) * f64::from(tc_rate.numerator)
+                            / f64::from(r.numerator)
+                            / f64::from(tc_rate.denominator))
+                        .round() as i64;
+                    return Some((start.saturating_add(frames), fps, drop, tc_rate));
+                }
+            }
+        }
+    }
+    None
+}
 fn partition(k: &[u8]) -> bool {
     k.len() == 16
         && k[..13] == [6, 14, 43, 52, 2, 5, 1, 1, 13, 1, 2, 1, 1]
@@ -237,6 +333,7 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
     ensure!(!primer.is_empty(), "missing primer");
     let mut m = MediaMetadata {
         project,
+        header_version: Some(1),
         ..Default::default()
     };
     let material = sets.iter().find(|s| s.key.ends_with("013600"));
@@ -246,6 +343,13 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
         m.created = field(s, 0x4405).and_then(date);
         m.modified = field(s, 0x4404).and_then(date);
     }
+    if let Some((start, fps, drop, tc_rate)) = material.and_then(|p| package_timecode(p, &sets, 0))
+    {
+        m.timecode_rate = Some(tc_rate);
+        m.start_timecode = Some(start);
+        m.timecode_fps = Some(fps);
+        m.timecode_drop = Some(drop);
+    }
     let source = sets.iter().filter(|s| s.key.ends_with("013700")).find(|s| {
         field(s, 0x4701).is_some_and(|id| {
             sets.iter()
@@ -254,6 +358,17 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
     });
     if let Some(s) = source {
         m.file_package_uid = field(s, 0x4401).map(hex);
+        m.track_id = material
+            .and_then(|p| {
+                tracks(p, &sets).into_iter().find(|t| {
+                    components(t, &sets)
+                        .iter()
+                        .any(|c| field(c, 0x1101) == field(s, 0x4401))
+                })
+            })
+            .and_then(|t| field(t, 0x4801))
+            .and_then(number);
+
         if let Some(d) = sets.iter().find(|d| field(d, 0x3c0a) == field(s, 0x4701)) {
             m.edit_rate = field(d, 0x3001).and_then(rate);
             m.duration = field(d, 0x3002).and_then(|b| b.try_into().ok().map(i64::from_be_bytes));
@@ -407,6 +522,14 @@ mod tests {
             assert_eq!(m.project.as_deref(), Some("BD Demo Reel"));
             assert_eq!(m.track_kind.as_deref(), Some(kind));
             assert!(m.duration.unwrap() > 0);
+            if kind == "audio" {
+                assert_eq!(m.start_timecode, Some(86710));
+            } else if m.codec.as_deref() == Some("DNxHR SQ") {
+                assert_eq!(m.start_timecode, Some(2792));
+                assert_eq!(m.timecode_fps, Some(24));
+            } else {
+                assert!(m.start_timecode.is_none());
+            }
             assert!(m.edit_rate.unwrap().denominator > 0);
             if kind == "audio" {
                 assert_eq!(m.codec.as_deref(), Some("PCM"));

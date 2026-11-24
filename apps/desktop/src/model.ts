@@ -13,6 +13,11 @@ export interface Metadata {
   edit_rate?: Rational | null;
   sample_rate?: Rational | null;
   duration?: number | null;
+  start_timecode?: number | null;
+  timecode_fps?: number | null;
+  timecode_drop?: boolean | null;
+  track_id?: number | null;
+  timecode_rate?: Rational | null;
   width?: number | null;
   height?: number | null;
   bit_depth?: number | null;
@@ -300,4 +305,91 @@ export function requiresDestination(files: MediaFile[]): boolean {
         .split(/[\\/]/)
         .some((part) => part.toLowerCase() === "avid mediafiles"),
   );
+}
+
+export interface Clip {
+  id: string;
+  name: string;
+  files: MediaFile[];
+  metadata: Metadata;
+  size: number;
+  tracks: string;
+}
+export function groupClips(files: MediaFile[]): Clip[] {
+  const groups = new Map<string, MediaFile[]>();
+  for (const file of files) {
+    const id = file.metadata.material_package_uid
+      ? `uid:${file.metadata.material_package_uid}`
+      : `file:${file.path}`;
+    groups.set(id, [...(groups.get(id) || []), file]);
+  }
+  return [...groups].map(([id, members]) => {
+    members.sort(
+      (a, b) =>
+        (a.metadata.track_id ?? 0) - (b.metadata.track_id ?? 0) ||
+        a.path.localeCompare(b.path),
+    );
+    const first =
+      members.find((f) => f.metadata.track_kind === "video") || members[0];
+    const tracks = (
+      [
+        ["video", "V"],
+        ["audio", "A"],
+        ["data", "D"],
+      ] as const
+    )
+      .flatMap(([kind, prefix]) => {
+        const n = new Set(
+          members
+            .filter((f) => f.metadata.track_kind === kind)
+            .map((f) => f.metadata.file_package_uid || f.path),
+        ).size;
+        return n ? [n === 1 ? `${prefix}1` : `${prefix}1–${prefix}${n}`] : [];
+      })
+      .join(" + ");
+    return {
+      id,
+      name: first.metadata.clip_name || filename(first.path),
+      files: members,
+      metadata: first.metadata,
+      size: totalSize(members),
+      tracks,
+    };
+  });
+}
+export function selectClip(
+  selected: Set<string>,
+  clip: Clip,
+  additive = true,
+): Set<string> {
+  const next = additive ? new Set(selected) : new Set<string>();
+  const remove = additive && clip.files.every((f) => selected.has(f.path));
+  clip.files.forEach((f) => (remove ? next.delete(f.path) : next.add(f.path)));
+  return next;
+}
+export function timecode(m: Metadata, seconds = 0): string {
+  if (m.start_timecode == null || !m.timecode_fps) return "—";
+  const fps = m.timecode_fps;
+  const r = m.timecode_rate || (m.track_kind !== "audio" ? m.edit_rate : null);
+  const rate = r && r.denominator > 0 ? r.numerator / r.denominator : fps;
+  let frames = Math.max(
+    0,
+    m.start_timecode + Math.floor(seconds * rate + 0.0001),
+  );
+  if (m.timecode_drop && (fps === 30 || fps === 60)) {
+    const drop = fps === 60 ? 4 : 2,
+      ten = fps * 600 - drop * 9;
+    const d = Math.floor(frames / ten),
+      rem = frames % ten;
+    frames +=
+      drop * 9 * d +
+      (rem >= drop ? drop * Math.floor((rem - drop) / (fps * 60 - drop)) : 0);
+  }
+  const parts = [
+    Math.floor(frames / (fps * 3600)) % 24,
+    Math.floor(frames / (fps * 60)) % 60,
+    Math.floor(frames / fps) % 60,
+    frames % fps,
+  ].map((n) => String(n).padStart(2, "0"));
+  return `${parts.slice(0, 3).join(":")}${m.timecode_drop ? ";" : ":"}${parts[3]}`;
 }

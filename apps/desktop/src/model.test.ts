@@ -159,3 +159,26 @@ describe("operation destination requirements", () => {
     );
   });
 });
+
+it("groups only UIDs and selects the complete clip even when members were filtered out", async () => {
+  const { groupClips, selectClip, timecode } = await import("./model");
+  const v = file("/media/v", "Film"),
+    a = file("/media/a", "Film"),
+    unknown = file("/media/u", "Film");
+  v.metadata.material_package_uid = a.metadata.material_package_uid = "same";
+  a.metadata.track_kind = "audio";
+  const clips = groupClips([v, a, unknown]);
+  expect(clips).toHaveLength(2);
+  const clip = clips.find((c) => c.files.length === 2)!;
+  expect(clip.tracks).toBe("V1 + A1");
+  expect([...selectClip(new Set(), clip)]).toEqual([a.path, v.path]);
+  expect(selectClip(new Set([a.path]), clip).size).toBe(2);
+  expect(selectClip(new Set([a.path, v.path]), clip).size).toBe(0);
+  expect(timecode({ start_timecode: 86400, timecode_fps: 24 })).toBe(
+    "01:00:00:00",
+  );
+  expect(
+    timecode({ start_timecode: 1800, timecode_fps: 30, timecode_drop: true }),
+  ).toBe("00:01:00;02");
+  expect(timecode({})).toBe("—");
+});

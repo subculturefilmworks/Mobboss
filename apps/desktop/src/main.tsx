@@ -29,6 +29,8 @@ import {
 } from "./model";
 import "./style.css";
 import Operations from "./Operations";
+import ClipTable from "./ClipTable";
+import { groupClips } from "./model";
 const desktop = "__TAURI_INTERNALS__" in window;
 const emptyFilters: Filters = {
   search: "",
@@ -47,6 +49,7 @@ function App() {
     concurrency: 8,
   });
   const [volumes, setVolumes] = useState<Volume[]>([]);
+  const [view, setView] = useStored("mobboss.view", "files");
   const [mode, setMode] = useStored("mobboss.mode", "quick");
   const [theme, setTheme] = useStored("mobboss.theme", "dark");
   const [filters, setFilters] = useState<Filters>(emptyFilters);
@@ -158,6 +161,12 @@ function App() {
       ),
     [rows, filters],
   );
+  const clips = useMemo(() => {
+    const matching = new Set(filtered.map((r) => r.file.path));
+    return groupClips(rows.map((r) => r.file)).filter((c) =>
+      c.files.some((f) => matching.has(f.path)),
+    );
+  }, [rows, filtered]);
   const summary = useMemo(() => projects(files), [files]);
   const selectedRows = useMemo(
     () => rows.filter((r) => selected.has(r.file.path)),
@@ -539,12 +548,34 @@ function App() {
               </small>
             </div>
           )}
-          <MediaTable
-            showDiff={!!filters.diff}
-            rows={filtered}
-            selected={selected}
-            setSelected={setSelected}
-          />
+          <div className="view-toggle" role="group" aria-label="Inventory view">
+            <button
+              aria-pressed={view === "files"}
+              onClick={() => setView("files")}
+            >
+              Files
+            </button>
+            <button
+              aria-pressed={view === "clips"}
+              onClick={() => setView("clips")}
+            >
+              Clips
+            </button>
+          </div>
+          {view === "clips" ? (
+            <ClipTable
+              clips={clips}
+              selected={selected}
+              setSelected={setSelected}
+            />
+          ) : (
+            <MediaTable
+              showDiff={!!filters.diff}
+              rows={filtered}
+              selected={selected}
+              setSelected={setSelected}
+            />
+          )}
           {reports.map((report, i) => {
             const r = report.reconciliation;
             return (
