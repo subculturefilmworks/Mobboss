@@ -110,7 +110,23 @@ function validate(binary, platform) {
     ["-muxers", ["mp4", "image2"]],
     [
       "-filters",
-      ["scale", "overlay", "lutrgb", "pan", "amerge", "adelay", "apad"],
+      [
+        "scale",
+        "overlay",
+        "lutrgb",
+        "pan",
+        "amerge",
+        "adelay",
+        "apad",
+        "null",
+        "anull",
+        "aformat",
+        "anullsrc",
+        "buffer",
+        "abuffer",
+        "buffersink",
+        "abuffersink",
+      ],
     ],
   ]) {
     const list = output([flag]);
@@ -266,7 +282,7 @@ async function macArch(arch) {
     "--enable-encoder=mjpeg,h264_videotoolbox,aac",
     "--enable-videotoolbox",
     "--enable-muxer=image2,mp4",
-    "--enable-filter=scale,format,split,lutrgb,overlay,aresample,pan,amerge,apad,atrim,asetpts,setpts,adelay",
+    "--enable-filter=scale,format,split,lutrgb,overlay,aresample,pan,amerge,apad,atrim,asetpts,setpts,adelay,null,anull,aformat,anullsrc,nullsink,anullsink,trim,buffer,abuffer,buffersink,abuffersink",
     "--enable-swscale",
     "--enable-swresample",
   ];

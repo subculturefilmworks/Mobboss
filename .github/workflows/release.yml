@@ -46,6 +46,16 @@ jobs:
           else
             node scripts/fetch-ffmpeg.mjs --target x86_64-pc-windows-msvc
           fi
+      - name: Smoke test bundled thumbnail and stereo proxy generation
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export MOBBOSS_FFMPEG="$PWD/apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin"
+          else
+            export MOBBOSS_FFMPEG="$(cygpath -w "$PWD/apps/desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe")"
+          fi
+          export MOBBOSS_REQUIRE_CODEC_SMOKE=1
+          cargo test -p mobboss-core --test bundled_previews -- --nocapture
       - name: Build unsigned universal Mac app and disk image
         if: runner.os == 'macOS'
         run: npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
@@ -100,6 +110,7 @@ jobs:
           name: MobBoss-Windows-portable
           # upload-artifact produces the portable ZIP directly: no nested archive.
           path: target/MobBoss-Windows-portable/
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
       - name: Report actual portable ZIP size
@@ -111,4 +122,9 @@ jobs:
               ...context.repo,
               artifact_id: Number('${{ steps.windows_portable.outputs.artifact-id }}')
             });
-            await core.summary.addRaw(`Portable Windows ZIP: ${artifact.data.size_in_bytes} bytes`).write();
+            const size = artifact.data.size_in_bytes;
+            await core.summary.addRaw(`Portable Windows ZIP: ${size} bytes`).write();
+            if (size > 60_000_000) {
+              core.warning('Portable Windows ZIP exceeds 60 MB; report size for minimal-build review.');
+              await core.summary.addRaw(' — Above 60 MB: consider a minimal Windows ffmpeg build in a later round.').write();
+            }

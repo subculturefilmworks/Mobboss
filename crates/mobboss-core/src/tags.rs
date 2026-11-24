@@ -1,5 +1,6 @@
 // Canonical SMPTE local tags are used internally only after resolving the Primer Pack UL.
 pub const TAGS: &[(u16, &str)] = &[
+    (0x0202, "060e2b34010101020702020101030000"),
     (0x1501, "060e2b34010101020702010301050000"),
     (0x1502, "060e2b34010101020404010102060000"),
     (0x1503, "060e2b34010101010404010105000000"),

@@ -243,10 +243,16 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
     let p = r.take(n)?;
     ensure!(p.len() >= 64, "short partition");
     let declared = u64::from_be_bytes(p[32..40].try_into()?);
-    let header_end =
-        r.r.stream_position()?
-            .checked_add(declared)
-            .context("header extent overflow")?;
+    // HeaderByteCount starts after the partition pack's KAG alignment filler.
+    // FFmpeg's compact OP-Atom headers expose the difference from pack-end.
+    let kag = u64::from(u32::from_be_bytes(p[4..8].try_into()?)).max(1);
+    let position = r.r.stream_position()?;
+    let header_start = position
+        .checked_add((kag - position % kag) % kag)
+        .context("header alignment overflow")?;
+    let header_end = header_start
+        .checked_add(declared)
+        .context("header extent overflow")?;
     ensure!(declared > 0, "empty or open header metadata extent");
     let mut r = Budget {
         used: r.used,
@@ -278,10 +284,13 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
         if partition(&k) || essence(&k) {
             break;
         }
-        if hex(&k) == "060e2b34010101010301021001000000" {
+        if k[..7] == [6, 14, 43, 52, 1, 1, 1] && k[8..] == [3, 1, 2, 16, 1, 0, 0, 0] {
             let pos = r.r.stream_position()?;
             let end = pos.checked_add(n as u64).context("filler overflow")?;
-            ensure!(end <= header_end + 4096, "filler beyond header extent");
+            ensure!(
+                end <= header_end.saturating_add(4096),
+                "filler beyond header extent"
+            );
             r.r.seek(SeekFrom::Start(end))?;
             continue;
         }
@@ -371,7 +380,21 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
 
         if let Some(d) = sets.iter().find(|d| field(d, 0x3c0a) == field(s, 0x4701)) {
             m.edit_rate = field(d, 0x3001).and_then(rate);
-            m.duration = field(d, 0x3002).and_then(|b| b.try_into().ok().map(i64::from_be_bytes));
+            m.duration = field(d, 0x3002)
+                .and_then(|b| b.try_into().ok().map(i64::from_be_bytes))
+                .or_else(|| {
+                    tracks(s, &sets)
+                        .into_iter()
+                        .filter(|t| field(t, 0x4b01).and_then(rate) == m.edit_rate)
+                        .filter(|t| {
+                            components(t, &sets)
+                                .iter()
+                                .any(|c| c.key.ends_with("011100"))
+                        })
+                        .filter_map(|t| field(t, 0x4803).and_then(|id| referenced(&sets, id)))
+                        .filter_map(|seq| field(seq, 0x0202))
+                        .find_map(|b| b.try_into().ok().map(i64::from_be_bytes))
+                });
             m.width = field(d, 0x3203).and_then(number);
             m.height = field(d, 0x3202).and_then(number);
             m.sample_rate = field(d, 0x3d03).and_then(rate);
@@ -621,7 +644,7 @@ mod safety_tests {
         }
         let mut b = include_bytes!("../../../tests/fixtures/video.header").to_vec();
         let limit = b.len() as u64;
-        let declared = limit - 129;
+        let declared = limit - 256;
         b[57..65].copy_from_slice(&declared.to_be_bytes());
         b.extend([0x55; 100]);
         let m = parse(Guard {
