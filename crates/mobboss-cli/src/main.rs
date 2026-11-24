@@ -3,7 +3,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mobboss_core::{default_index, CancellationToken, Index, ScanMode, ScanOptions};
 use std::path::PathBuf;
 #[derive(Parser)]
-#[command(version, about = "Mob Boss — read-only Avid media inventory")]
+#[command(
+    version,
+    about = "Mob Boss — Avid media inventory and verified collection"
+)]
 struct Args {
     #[arg(
         long,
@@ -20,8 +23,32 @@ enum Mode {
     Auto,
     Deep,
 }
+#[derive(clap::Args)]
+struct TransferArgs {
+    #[arg(long)]
+    project: String,
+    #[arg(long)]
+    dest: Option<PathBuf>,
+    /// Execute the displayed plan. Quit Media Composer first.
+    #[arg(long)]
+    yes: bool,
+    /// Optional indexed paths; omit to use the entire project.
+    #[arg(long = "file")]
+    files: Vec<PathBuf>,
+}
 #[derive(Subcommand)]
 enum Command {
+    /// Preview a copy plan without changing media.
+    Plan(TransferArgs),
+    Move(TransferArgs),
+    Copy(TransferArgs),
+    Collect(TransferArgs),
+    /// Preview undo; pass --yes to reverse verified transfers.
+    Undo {
+        log: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Scan a folder recursively without changing media.
     Scan {
         /// Folder or mounted drive to inventory.
@@ -59,6 +86,9 @@ enum Command {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    let cancel = CancellationToken::default();
+    let interrupt = cancel.clone();
+    ctrlc::set_handler(move || interrupt.cancel())?;
     let path = args.index.map(Ok).unwrap_or_else(default_index)?;
     let mut index = match &args.command {
         Command::Scan { path: root, .. } | Command::Diff { path: root } => {
@@ -66,7 +96,49 @@ fn main() -> Result<()> {
         }
         _ => Index::open(&path)?,
     };
+    let operation = match &args.command {
+        Command::Move(_) => mobboss_core::plan::Operation::Move,
+        Command::Collect(_) => mobboss_core::plan::Operation::Collect,
+        _ => mobboss_core::plan::Operation::Copy,
+    };
+    let preview = matches!(&args.command, Command::Plan(_));
     match args.command {
+        Command::Plan(a) | Command::Move(a) | Command::Copy(a) | Command::Collect(a) => {
+            let plan = mobboss_core::ops::prepare(
+                &index,
+                operation,
+                &a.project,
+                &a.files,
+                a.dest.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            eprintln!("Quit Media Composer before moving media. Avid will rebuild its media databases on next launch.");
+            if a.yes && !preview {
+                let data = default_index()?.parent().unwrap().to_path_buf();
+                let result = mobboss_core::ops::execute(&mut index, &plan, &data, &cancel, |p| {
+                    eprintln!("{} / {}  {}", p.done, p.total, p.source.display())
+                })?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                eprintln!("Dry run only. Use move/copy/collect --yes to execute.");
+            }
+        }
+        Command::Undo { log, yes } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&mobboss_core::ops::preview_undo(&index, &log)?)?
+            );
+            eprintln!("Quit Media Composer before undo. Copies are deleted only if their checksum still matches.");
+            if yes {
+                let data = default_index()?.parent().unwrap().to_path_buf();
+                let result = mobboss_core::ops::undo(&mut index, &log, &data, &cancel, |p| {
+                    eprintln!("{} / {}", p.done, p.total)
+                })?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                eprintln!("Dry run only. Pass --yes to undo.");
+            }
+        }
         Command::Scan {
             path,
             mode,
@@ -82,7 +154,7 @@ fn main() -> Result<()> {
                         Mode::Deep => ScanMode::Deep,
                     },
                 },
-                &CancellationToken::default(),
+                &cancel,
                 |_| {},
             )?;
             for w in &r.warnings {

@@ -99,7 +99,9 @@ fn index_symlink_guard() {
 }
 #[test]
 fn sample_folder_when_available() {
-    let root = Path::new("<sample-folder>");
+    let root = Path::new(
+        "<sample-folder>/Avid MediaFiles/MXF/EDIT-PC.1",
+    );
     if !root.exists() {
         eprintln!("sample folder absent; skipping external-data validation");
         return;
