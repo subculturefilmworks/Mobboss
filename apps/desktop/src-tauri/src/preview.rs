@@ -300,8 +300,6 @@ pub async fn clear_preview_cache(app: tauri::AppHandle) -> Reply<()> {
             {
                 return Err("Preview cache is already being cleared".into());
             }
-            cancel_thumbnails(state.clone())?;
-            cancel_proxy(None, state.clone())?;
         }
         struct Reset<'a>(&'a std::sync::atomic::AtomicBool);
         impl Drop for Reset<'_> {
@@ -310,6 +308,8 @@ pub async fn clear_preview_cache(app: tauri::AppHandle) -> Reply<()> {
             }
         }
         let _reset = Reset(&state.preview_clearing);
+        cancel_thumbnails(state.clone())?;
+        cancel_proxy(None, state.clone())?;
         for _ in 0..100 {
             let idle = state.thumbnails.lock().map_err(err)?.is_none()
                 && state.proxy.lock().map_err(err)?.active.is_none();

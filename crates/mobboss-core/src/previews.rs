@@ -187,9 +187,11 @@ impl PreviewCache {
     pub fn open(root: &Path) -> Result<Self> {
         let root = crate::validate_destination(root)?;
         fs::create_dir_all(&root)?;
-        Ok(Self {
+        let cache = Self {
             root: root.canonicalize()?,
-        })
+        };
+        cache.cleanup_partials()?;
+        Ok(cache)
     }
     pub fn path(&self, key: &str, extension: &str) -> Result<PathBuf> {
         ensure!(
@@ -268,7 +270,8 @@ impl PreviewCache {
     ) -> Result<PathBuf> {
         verify_source(file)?;
         self.generate(&cache_key(file), "jpg", |temp| {
-            ffmpeg.run(&thumbnail_args(file, temp), cancel, |_| {})
+            ffmpeg.run(&thumbnail_args(file, temp), cancel, |_| {})?;
+            verify_source(file)
         })
     }
 }
@@ -621,8 +624,50 @@ impl PreviewCache {
         self.generate(
             &proxy_key(clip, tracks, platform)?,
             platform.extension(),
-            |temp| ffmpeg.run(&proxy_args(clip, tracks, platform, temp)?, cancel, progress),
+            |temp| {
+                ffmpeg.run(&proxy_args(clip, tracks, platform, temp)?, cancel, progress)?;
+                for file in video.into_iter().chain(audio.iter().copied()) {
+                    verify_source(file)?;
+                }
+                Ok(())
+            },
         )
+    }
+    fn cleanup_partials(&self) -> Result<()> {
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some((stem, extension)) = name.rsplit_once(".partial.") else {
+                continue;
+            };
+            let Some((key, _)) = stem.split_once('-') else {
+                continue;
+            };
+            if key.len() != 64
+                || !key.bytes().all(|b| b.is_ascii_hexdigit())
+                || !["jpg", "webm", "mp4"].contains(&extension)
+            {
+                continue;
+            }
+            let lock_path = self.root.join(format!("{key}.{extension}.lock"));
+            if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
+                continue;
+            }
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)?;
+            if fs2::FileExt::try_lock_exclusive(&lock).is_ok() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
     }
     fn entries(&self) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
         let mut files = Vec::new();
@@ -653,6 +698,7 @@ impl PreviewCache {
     /// Modification times are access times for immutable completed previews.
     /// Locked generations and the currently playing file are never evicted.
     pub fn prune(&self, cap: u64, protected: &[PathBuf]) -> Result<u64> {
+        self.cleanup_partials()?;
         let mut entries = self.entries()?;
         entries.sort_by_key(|(_, _, time)| *time);
         let mut size: u64 = entries.iter().map(|(_, n, _)| n).sum();
@@ -689,7 +735,7 @@ impl PreviewCache {
     }
     pub fn clear(&self) -> Result<()> {
         self.prune(0, &[])?;
-        // Leave locks and in-progress partials alone: callers cancel/join workers first.
+        // Zero-byte lock files stay stable across app instances.
         Ok(())
     }
 }
@@ -768,6 +814,51 @@ mod proxy_tests {
         );
         assert!(proxy_args(&clip, &[3], ProxyPlatform::Mac, out).is_err());
         assert!(proxy_args(&clip, &[0, 0], ProxyPlatform::Mac, out).is_err());
+    }
+    #[test]
+    fn orphan_partials_are_cleaned_but_live_jobs_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(temp.path()).unwrap();
+        let key = "a".repeat(64);
+        let path = cache.root.join(format!("{key}-123-1.partial.mp4"));
+        fs::write(&path, [0; 50]).unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .read(true)
+            .open(cache.root.join(format!("{key}.mp4.lock")))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        PreviewCache::open(temp.path()).unwrap();
+        assert!(path.exists());
+        drop(lock);
+        PreviewCache::open(temp.path()).unwrap();
+        assert!(!path.exists());
+    }
+    #[test]
+    fn sync_offsets_trim_or_delay_and_track_order_is_in_the_key() {
+        let mut c = grouped();
+        c.files[1].metadata.start_timecode = Some(25);
+        c.files[2].metadata.start_timecode = Some(-25);
+        let args = proxy_args(
+            &c,
+            &[0, 1],
+            ProxyPlatform::Mac,
+            Path::new("/cache/proxy.mp4"),
+        )
+        .unwrap();
+        let graph = args
+            .iter()
+            .find(|s| s.to_string_lossy().contains("amerge"))
+            .unwrap()
+            .to_string_lossy();
+        assert!(graph.contains("atrim=start=1.000000"));
+        assert!(graph.contains("adelay=1000:all=1"));
+        assert_ne!(
+            proxy_key(&c, &[0, 1], ProxyPlatform::Mac).unwrap(),
+            proxy_key(&c, &[1, 0], ProxyPlatform::Mac).unwrap()
+        );
     }
     #[test]
     fn lru_keeps_recent_and_protected_and_clear_ignores_unrelated_files() {
