@@ -62,4 +62,4 @@ All 344 files resolve to **BD Demo Reel**; PMR and disk inventories agree. The s
 
 The PMR parser is a bounds-checked Rust port of DJFio's MIT-licensed [MDV snippet](https://github.com/DJFio/MDV/blob/master/snippets/pmrtool.cpp), credited in its source. Mob Boss does not use the abandoned MDVx application's code or require it at runtime.
 
-Additional NAS I/O timing breakdowns and sample JSON rows are in [performance notes](docs/performance-notes.md).
+Deep scanning is I/O-bound on the tested NAS: network file opens and header reads dominate the measured work. Bounded parallel reads are an option for a later phase and are not implemented yet. The earlier 36.005-second deep run used a debug build; the release result is 31.530 seconds. Additional NAS I/O timing breakdowns, cache-condition caveats and sample JSON rows are in [performance notes](docs/performance-notes.md).
