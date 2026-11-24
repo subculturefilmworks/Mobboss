@@ -71,7 +71,6 @@ export interface Settings {
   index: string;
   roots: string[];
   concurrency: number;
-  preview_cache_bytes: number;
 }
 export interface Volume {
   name: string;

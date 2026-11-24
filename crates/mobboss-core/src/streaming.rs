@@ -466,7 +466,10 @@ impl Session {
         Ok(StreamStatus {
             phase: if complete {
                 "ready"
-            } else if state.end > self.start {
+            } else if state.end > self.start
+                || p.frames.is_some_and(|n| n > 0)
+                || p.seconds > self.start
+            {
                 "encoding"
             } else {
                 "reading"
@@ -476,8 +479,8 @@ impl Session {
             input_bytes: self.source.0,
             input_files: self.source.1,
             output_bytes: state.output_bytes,
-            eta_seconds: (speed > 0.0 && !complete)
-                .then(|| ((self.duration - self.start - seconds) / speed).max(0.0)),
+            eta_seconds: (speed > 0.0 && !complete && state.end <= self.start)
+                .then(|| (((self.duration - self.start).min(1.0) - seconds) / speed).max(0.0)),
             encoder: state.encoder.description().into(),
             buffered_end: state.end,
             memory_bytes: state.memory.bytes(),

@@ -55,7 +55,6 @@ function App() {
     index: "",
     roots: [],
     concurrency: 8,
-    preview_cache_bytes: 5_000_000_000,
   });
   const [volumes, setVolumes] = useState<Volume[]>([]);
   const [view, setView] = useStored("mobboss.view", "files");
@@ -829,40 +828,22 @@ function App() {
               8 is the default. Mounted shares must be connected in Finder or
               Explorer to appear in Sources.
             </p>
-            <label>
-              Preview cache limit (GB)
-              <input
-                type="number"
-                min="0.1"
-                max="1000"
-                step="0.1"
-                value={settings.preview_cache_bytes / 1_000_000_000}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    preview_cache_bytes: Math.round(
-                      Number(e.target.value) * 1_000_000_000,
-                    ),
-                  })
-                }
-              />
-            </label>
             <p className="hint">
-              Least recently used previews are removed first. Current usage:{" "}
-              {bytes(previews.status.cache_bytes || 0)}.
+              Playback stays in memory and is discarded when the app quits.
+              Thumbnails use {bytes(previews.status.thumbnail_bytes || 0)} on
+              disk.
             </p>
             <button
               disabled={!desktop || busy}
               onClick={() =>
                 run(async () => {
-                  setPlayer(null);
-                  await invoke("clear_preview_cache");
+                  await invoke("clear_thumbnails");
                   await previews.refresh();
-                  setNotice("Preview cache cleared");
+                  setNotice("Thumbnails cleared");
                 })
               }
             >
-              Clear preview cache
+              Clear thumbnails
             </button>
             <div className="modal-actions">
               <button

@@ -127,35 +127,34 @@ fn copied_sample_previews() -> anyhow::Result<()> {
                 .any(|f| f.metadata.track_kind.as_deref() == Some("audio"))
         })
         .unwrap();
-    let proxy = cache
-        .proxy_with_fallback(
-            &ffmpeg,
-            &clip,
-            &[0],
-            mobboss_core::previews::ProxyPlatform::current(),
-            &token,
-            |_| {},
-        )?
-        .path;
-    assert!(fs::metadata(&proxy)?.len() > 1000);
-    let probe = ffmpeg.binary.with_file_name(if cfg!(windows) {
-        "ffprobe.exe"
-    } else {
-        "ffprobe"
-    });
-    if probe.exists() {
-        let result = std::process::Command::new(probe)
-            .args(["-v", "error", "-show_streams", "-of", "json"])
-            .arg(&proxy)
-            .output()?;
-        assert!(result.status.success());
-        let data: serde_json::Value = serde_json::from_slice(&result.stdout)?;
-        let streams = data["streams"].as_array().unwrap();
-        assert!(streams.iter().any(|s| s["codec_type"] == "video"));
-        assert!(streams
-            .iter()
-            .any(|s| s["codec_type"] == "audio" && s["channels"] == 2));
-    }
+    let engine = mobboss_core::streaming::Streaming::default();
+    let session = engine.start(
+        ffmpeg.clone(),
+        cache.clone(),
+        mobboss_core::streaming::StartStream {
+            id: "copied-sample-stream".into(),
+            clip,
+            tracks: vec![0],
+            start: 0.0,
+            encoder: None,
+        },
+    )?;
+    let init = match session.read(None, std::time::Duration::from_secs(8)) {
+        mobboss_core::streaming::ReadResult::Init(init, _) => init,
+        mobboss_core::streaming::ReadResult::Failed(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("missing copied-sample stream"),
+    };
+    assert!(init.tracks.iter().any(|t| t.video));
+    assert!(init.tracks.iter().any(|t| t.audio && t.channels == 2));
+    assert!(matches!(
+        session.read(Some(0), std::time::Duration::ZERO),
+        mobboss_core::streaming::ReadResult::Media(_)
+    ));
+    engine.shutdown();
+    assert!(fs::read_dir(&cache.root)?.flatten().all(|e| !e
+        .path()
+        .extension()
+        .is_some_and(|s| s == "mp4" || s == "webm")));
     assert_eq!(
         fs::read_dir(&media)?.count(),
         4,

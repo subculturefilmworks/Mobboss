@@ -37,6 +37,32 @@ impl<R: std::io::Read> std::io::Read for ShortReads<R> {
         self.0.read(&mut buffer[..size])
     }
 }
+fn decode(ffmpeg: &Ffmpeg, args: &[&str], encoded: Vec<u8>) -> Result<std::process::Output> {
+    let mut child = Command::new(&ffmpeg.binary)
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+        ])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().context("decode stdin")?;
+    let writer = std::thread::spawn(move || stdin.write_all(&encoded));
+    let decoded = child.wait_with_output()?;
+    match writer.join().unwrap() {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::BrokenPipe && decoded.status.success() => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(decoded)
+}
 #[test]
 fn fixture_pipe_seek_and_stereo() -> Result<()> {
     let Some(ffmpeg) = Ffmpeg::locate(&[]) else {
@@ -122,14 +148,9 @@ fn fixture_pipe_seek_and_stereo() -> Result<()> {
                 "missing split fragment"
             );
             ensure!(splitter.next_segment()?.is_none(), "unexpected split tail");
-            let mut child = Command::new(&ffmpeg.binary)
-                .args([
-                    "-nostdin",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-i",
-                    "pipe:0",
+            let decoded = decode(
+                &ffmpeg,
+                &[
                     "-map",
                     "0:a:0",
                     "-c:a",
@@ -137,15 +158,33 @@ fn fixture_pipe_seek_and_stereo() -> Result<()> {
                     "-f",
                     "s16le",
                     "pipe:1",
-                ])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
-            let mut stdin = child.stdin.take().context("decode stdin")?;
-            let writer = std::thread::spawn(move || stdin.write_all(&encoded));
-            let decoded = child.wait_with_output()?;
-            writer.join().unwrap()?;
+                ],
+                encoded.clone(),
+            )?;
+            let picture = decode(
+                &ffmpeg,
+                &[
+                    "-map",
+                    "0:v:0",
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "mjpeg",
+                    "-update",
+                    "1",
+                    "-f",
+                    "image2",
+                    "pipe:1",
+                ],
+                encoded,
+            )?;
+            ensure!(
+                picture.status.success()
+                    && picture.stdout.starts_with(&[0xff, 0xd8])
+                    && picture.stdout.ends_with(&[0xff, 0xd9]),
+                "stream video decode failed: {}",
+                String::from_utf8_lossy(&picture.stderr)
+            );
             ensure!(
                 decoded.status.success(),
                 "stereo decode failed: {}",

@@ -1032,6 +1032,7 @@ pub fn proxy_args(
     args.push(output.as_os_str().into());
     Ok(args)
 }
+#[cfg(test)]
 #[derive(Serialize)]
 pub struct ProxyOutput {
     pub path: PathBuf,
@@ -1106,6 +1107,7 @@ impl PreviewCache {
         let _ = fs::remove_file(temp);
         result
     }
+    #[cfg(test)]
     fn with_fallback(
         &self,
         ffmpeg: &Ffmpeg,
@@ -1161,23 +1163,6 @@ impl PreviewCache {
             },
         })
     }
-    pub fn proxy_with_fallback(
-        &self,
-        ffmpeg: &Ffmpeg,
-        clip: &Clip,
-        tracks: &[usize],
-        platform: ProxyPlatform,
-        cancel: &CancellationToken,
-        mut progress: impl FnMut(FfmpegProgress),
-    ) -> Result<ProxyOutput> {
-        let video = clip
-            .files
-            .iter()
-            .any(|f| f.metadata.track_kind.as_deref() == Some("video"));
-        self.with_fallback(ffmpeg, platform, video, cancel, |profile| {
-            self.proxy(ffmpeg, clip, tracks, profile, cancel, &mut progress)
-        })
-    }
 }
 impl PreviewCache {
     /// Upgrade from file proxies to memory streaming. Keep JPEGs and encoder preferences.
@@ -1195,31 +1180,6 @@ impl PreviewCache {
             }
         }
         Ok(())
-    }
-    pub fn proxy(
-        &self,
-        ffmpeg: &Ffmpeg,
-        clip: &Clip,
-        tracks: &[usize],
-        platform: ProxyPlatform,
-        cancel: &CancellationToken,
-        progress: impl FnMut(FfmpegProgress),
-    ) -> Result<PathBuf> {
-        let (video, audio) = proxy_inputs(clip, tracks)?;
-        for file in video.into_iter().chain(audio.iter().copied()) {
-            verify_source(file)?;
-        }
-        self.generate(
-            &proxy_key(clip, tracks, platform)?,
-            platform.extension(),
-            |temp| {
-                ffmpeg.run(&proxy_args(clip, tracks, platform, temp)?, cancel, progress)?;
-                for file in video.into_iter().chain(audio.iter().copied()) {
-                    verify_source(file)?;
-                }
-                Ok(())
-            },
-        )
     }
     fn cleanup_partials(&self) -> Result<()> {
         for entry in fs::read_dir(&self.root)? {

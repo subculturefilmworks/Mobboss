@@ -852,11 +852,14 @@ progress {
   background: #202020;
 }
 .poster.placeholder {
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
   font-size: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #666;
+  color: var(--muted);
 }
 .clip-grid {
   overflow: auto;
@@ -1013,6 +1016,9 @@ progress {
 }
 
 .poster.placeholder {
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
   color: var(--muted);
   text-align: center;
   padding: 4px;

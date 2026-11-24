@@ -14,11 +14,6 @@ pub struct Settings {
     pub index: PathBuf,
     pub roots: Vec<PathBuf>,
     pub concurrency: usize,
-    #[serde(default = "default_preview_cap")]
-    pub preview_cache_bytes: u64,
-}
-pub fn default_preview_cap() -> u64 {
-    5_000_000_000
 }
 impl Settings {
     pub fn load() -> Result<Self> {
@@ -31,7 +26,6 @@ impl Settings {
             index,
             roots: vec![],
             concurrency: 8,
-            preview_cache_bytes: default_preview_cap(),
         })
     }
     pub fn save(&self) -> Result<()> {
@@ -39,10 +33,6 @@ impl Settings {
         ensure!(
             (1..=64).contains(&self.concurrency),
             "concurrency must be 1–64"
-        );
-        ensure!(
-            (100_000_000..=1_000_000_000_000).contains(&self.preview_cache_bytes),
-            "Preview cache must be between 0.1 and 1000 GB"
         );
         let config = default_index()?.with_file_name("settings.json");
         fs::create_dir_all(config.parent().context("invalid settings path")?)?;
@@ -196,6 +186,16 @@ pub fn reveal(path: &Path, settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_proxy_limit_is_ignored_and_never_saved_again() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "index": "catalog.sqlite", "roots": [], "concurrency": 8,
+            "preview_cache_bytes": 5_000_000_000u64,
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(settings).unwrap();
+        assert!(saved.get("preview_cache_bytes").is_none());
+    }
     #[test]
     fn rejects_media_exports_and_index_overwrite() {
         let dir = std::env::temp_dir().join(format!("mobboss-service-{}", std::process::id()));

@@ -1,5 +1,9 @@
 # Phase 4 preview validation
 
+Historical baseline: the disk-proxy and cache behavior below has been replaced by
+[Card 3 streaming preview](streaming-validation.md). See that document for current
+playback behavior, tests, measurements and platform checks.
+
 ## Implemented behavior
 
 - SQLite grouping migration stores clip membership by material UID. Triggers keep it

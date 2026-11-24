@@ -297,7 +297,7 @@ async function macArch(arch) {
     "--enable-parser=dnxhd,dnxuc,h264,aac",
     "--enable-encoder=mjpeg,h264_videotoolbox,aac,pcm_s16le",
     "--enable-videotoolbox",
-    "--enable-muxer=image2,mp4,s16le",
+    "--enable-muxer=image2,mp4,pcm_s16le",
     "--enable-filter=scale,format,split,lutrgb,overlay,aresample,pan,amerge,apad,atrim,asetpts,setpts,adelay,null,anull,aformat,anullsrc,nullsink,anullsink,trim,buffer,abuffer,buffersink,abuffersink",
     "--enable-swscale",
     "--enable-swresample",

@@ -10,3 +10,6 @@ mod preview;
 
 #[cfg(feature = "desktop")]
 mod dialog;
+
+#[cfg(feature = "desktop")]
+mod stream;
