@@ -4,7 +4,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -102,7 +102,7 @@ impl Ffmpeg {
                 break child.wait();
             }
             match child.try_wait() {
-                Ok(Some(s)) => break Ok(s),
+                Ok(Some(_)) => break child.wait(),
                 Ok(None) => std::thread::sleep(Duration::from_millis(50)),
                 Err(e) => {
                     let _ = child.kill();
@@ -111,11 +111,38 @@ impl Ffmpeg {
                 }
             }
         };
+        // Release the process handle before callers clean up or publish its output.
+        drop(child);
         let _ = output.join();
         let stderr = errors.join().unwrap_or_default();
         ensure!(!cancel.is_cancelled(), "Preview cancelled");
         ensure!(status?.success(), "Preview failed: {stderr}");
         Ok(())
+    }
+}
+// Antivirus/indexer handles can briefly outlive a reaped Windows process.
+// Do not retry unrelated errors or delay normal cleanup on other platforms.
+fn retry_partial_cleanup(
+    mut remove: impl FnMut() -> std::io::Result<()>,
+    mut pause: impl FnMut(Duration),
+    windows: bool,
+) -> std::io::Result<()> {
+    let delays = [25, 75, 150];
+    let mut attempt = 0;
+    loop {
+        match remove() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if windows
+                    && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && attempt < delays.len() =>
+            {
+                pause(Duration::from_millis(delays[attempt]));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 pub fn cache_key(file: &MediaFile) -> String {
@@ -210,13 +237,57 @@ impl PreviewCache {
         Ok(path)
     }
     pub fn existing(&self, key: &str, extension: &str) -> Result<Option<PathBuf>> {
+        self.existing_with_touch(key, extension, |path| {
+            // SetFileTime on Windows requires FILE_WRITE_ATTRIBUTES, which a
+            // read-only File::open handle does not have. Never truncate cached data.
+            let file = self.io("open for LRU update", &[path], || {
+                OpenOptions::new().write(true).open(path)
+            })?;
+            self.io("update LRU timestamp", &[path], || {
+                file.set_modified(SystemTime::now())
+            })
+        })
+    }
+    fn existing_with_touch(
+        &self,
+        key: &str,
+        extension: &str,
+        touch: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<Option<PathBuf>> {
         let path = self.path(key, extension)?;
         if fs::metadata(&path).is_ok_and(|m| m.len() > 0 && m.is_file()) {
-            File::open(&path)?.set_modified(SystemTime::now())?;
+            if let Err(error) = touch(&path) {
+                // Recency bookkeeping must never prevent playback of a valid preview.
+                eprintln!("Preview LRU update skipped: {error}");
+            }
             Ok(Some(path))
         } else {
             Ok(None)
         }
+    }
+    fn io<T>(
+        &self,
+        operation: &str,
+        paths: &[&Path],
+        run: impl FnOnce() -> std::io::Result<T>,
+    ) -> Result<T> {
+        run().map_err(|error| {
+            let names = paths
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&self.root)
+                        .unwrap_or(Path::new("<outside cache>"))
+                        .to_string_lossy()
+                })
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            anyhow::anyhow!("Preview cache {operation} [{names}]: {error}")
+        })
+    }
+    fn remove_partial(&self, path: &Path) -> Result<()> {
+        self.io("remove partial", &[path], || {
+            retry_partial_cleanup(|| fs::remove_file(path), std::thread::sleep, cfg!(windows))
+        })
     }
     /// Publish atomically; concurrent attempts serialize per key. Failed/cancelled jobs
     /// remove only their own temporary output, so retries never see partial previews.
@@ -232,12 +303,14 @@ impl PreviewCache {
             !fs::symlink_metadata(&lock_path).is_ok_and(|s| s.file_type().is_symlink()),
             "Preview lock symlink rejected"
         );
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)?;
+        let lock = self.io("open generation lock", &[&lock_path], || {
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+        })?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("Preview already being generated; retry shortly")?;
         if let Some(path) = self.existing(key, extension)? {
@@ -249,18 +322,30 @@ impl PreviewCache {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
+        // A separate name and closed reservation handle for every encoder attempt.
+        drop(self.io("create partial", &[&temp], || {
+            OpenOptions::new().write(true).create_new(true).open(&temp)
+        })?);
         let result = (|| {
             job(&temp)?;
-            ensure!(fs::metadata(&temp)?.len() > 0, "Empty preview output");
-            fs::rename(&temp, &output)?;
+            ensure!(
+                self.io("stat partial", &[&temp], || fs::metadata(&temp))?
+                    .len()
+                    > 0,
+                "Empty preview output"
+            );
+            self.io("publish without replacement", &[&temp, &output], || {
+                crate::ops::publish(&temp, &output)
+            })?;
             Ok(output)
         })();
-        let _ = fs::remove_file(temp);
-        result
+        let cleanup = self.remove_partial(&temp);
+        match (result, cleanup) {
+            (Err(error), Err(cleanup)) => Err(anyhow::anyhow!("{error}; {cleanup}")),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(cleanup)) => Err(cleanup),
+            (Ok(path), Ok(())) => Ok(path),
+        }
     }
     pub fn thumbnail(
         &self,
@@ -810,7 +895,7 @@ impl PreviewCache {
                 .write(true)
                 .open(lock_path)?;
             if fs2::FileExt::try_lock_exclusive(&lock).is_ok() {
-                let _ = fs::remove_file(entry.path());
+                self.remove_partial(&entry.path())?;
             }
         }
         Ok(())
@@ -1081,6 +1166,150 @@ mod proxy_tests {
         assert_eq!(calls, 1);
     }
     #[test]
+    fn windows_encoder_failure_retries_fresh_and_cached_outputs() {
+        for cached in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ffmpeg = Ffmpeg {
+                binary: dir.path().join("ffmpeg"),
+            };
+            fs::write(&ffmpeg.binary, "binary").unwrap();
+            let cache = PreviewCache::open(&dir.path().join("previews")).unwrap();
+            let clip = grouped();
+            let webm_key = proxy_key(&clip, &[0], ProxyPlatform::WindowsWebm).unwrap();
+            let webm_path = cache.path(&webm_key, "webm").unwrap();
+            if cached {
+                fs::write(&webm_path, "completed webm").unwrap();
+                OpenOptions::new()
+                    .write(true)
+                    .open(&webm_path)
+                    .unwrap()
+                    .set_modified(SystemTime::UNIX_EPOCH)
+                    .unwrap();
+                // This is the precise Windows API contract behind rc6's cache-hit failure.
+                #[cfg(windows)]
+                assert_eq!(
+                    std::fs::File::open(&webm_path)
+                        .unwrap()
+                        .set_modified(SystemTime::now())
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+            let mut partials = Vec::new();
+            let mut calls = Vec::new();
+            let output = cache
+                .with_fallback(
+                    &ffmpeg,
+                    ProxyPlatform::Windows,
+                    true,
+                    &CancellationToken::default(),
+                    |profile| {
+                        calls.push(profile);
+                        let key = proxy_key(&clip, &[0], profile)?;
+                        cache.generate(&key, profile.extension(), |partial| {
+                            assert!(!partials.iter().any(|p: &PathBuf| p.exists()));
+                            partials.push(partial.to_owned());
+                            if profile == ProxyPlatform::Windows {
+                                fs::write(partial, "failed mp4")?;
+                                anyhow::bail!(
+                                    "h264_mf: could not find any MFT for the given media type"
+                                );
+                            }
+                            assert!(!cached, "cache hit must not re-encode");
+                            fs::write(partial, "completed webm")?;
+                            Ok(())
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(calls, [ProxyPlatform::Windows, ProxyPlatform::WindowsWebm]);
+            assert_eq!(output.path, webm_path);
+            assert_eq!(fs::read(&webm_path).unwrap(), b"completed webm");
+            assert!(fs::metadata(&webm_path).unwrap().modified().unwrap() > SystemTime::UNIX_EPOCH);
+            assert!(partials.iter().all(|p| !p.exists()));
+            assert_eq!(partials.len(), if cached { 1 } else { 2 });
+        }
+    }
+    #[test]
+    fn preview_publish_never_replaces_a_racing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(dir.path()).unwrap();
+        let key = "a".repeat(64);
+        let output = cache.path(&key, "webm").unwrap();
+        let mut partial = PathBuf::new();
+        let error = cache
+            .generate(&key, "webm", |temp| {
+                partial = temp.into();
+                fs::write(temp, "new output")?;
+                fs::write(&output, "existing output")?;
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(fs::read(output).unwrap(), b"existing output");
+        assert!(!partial.exists());
+        assert!(error.contains("publish without replacement"));
+        assert!(error.contains(&format!("{key}.webm")));
+        assert!(!error.contains(dir.path().to_str().unwrap()));
+    }
+    #[test]
+    fn failed_lru_touch_does_not_block_a_completed_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(dir.path()).unwrap();
+        let key = "b".repeat(64);
+        let path = cache.path(&key, "webm").unwrap();
+        fs::write(&path, "completed preview").unwrap();
+        let hit = cache
+            .existing_with_touch(&key, "webm", |p| {
+                cache.io("update LRU timestamp", &[p], || {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                })
+            })
+            .unwrap();
+        assert_eq!(hit, Some(path.clone()));
+        assert_eq!(fs::read(path).unwrap(), b"completed preview");
+    }
+    #[test]
+    fn partial_cleanup_backoff_is_bounded_and_windows_only() {
+        for windows in [false, true] {
+            let mut calls = 0;
+            let mut delays = Vec::new();
+            let result = retry_partial_cleanup(
+                || {
+                    calls += 1;
+                    Err(std::io::Error::from_raw_os_error(32))
+                },
+                |delay| delays.push(delay),
+                windows,
+            );
+            assert!(result.is_err());
+            assert_eq!(calls, if windows { 4 } else { 1 });
+            assert_eq!(delays.len(), if windows { 3 } else { 0 });
+        }
+        let mut calls = 0;
+        retry_partial_cleanup(
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err(std::io::Error::from_raw_os_error(5))
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {},
+            true,
+        )
+        .unwrap();
+        assert_eq!(calls, 2);
+        retry_partial_cleanup(
+            || Err(std::io::ErrorKind::NotFound.into()),
+            |_| panic!("missing file needs no delay"),
+            true,
+        )
+        .unwrap();
+    }
+    #[test]
     fn orphan_partials_are_cleaned_but_live_jobs_are_preserved() {
         let temp = tempfile::tempdir().unwrap();
         let cache = PreviewCache::open(temp.path()).unwrap();
@@ -1134,7 +1363,9 @@ mod proxy_tests {
         for (i, key) in keys.iter().enumerate() {
             let path = cache.path(key, "mp4").unwrap();
             fs::write(&path, [0; 10]).unwrap();
-            File::open(&path)
+            OpenOptions::new()
+                .write(true)
+                .open(&path)
                 .unwrap()
                 .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(i as u64))
                 .unwrap();
