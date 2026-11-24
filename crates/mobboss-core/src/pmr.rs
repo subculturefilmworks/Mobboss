@@ -41,6 +41,17 @@ impl<'a> Reader<'a> {
             .to_string())
     }
 }
+// Full PMR UMIDs carry the material-number UUID in the database's byte order.
+// Normalize UUID Data1/Data2/Data3 to the network order used by MXF UMIDs.
+fn uid(b: &[u8], be: bool) -> String {
+    let mut b = b.to_vec();
+    if b.len() == 32 && !be {
+        b[16..20].reverse();
+        b[20..22].reverse();
+        b[22..24].reverse();
+    }
+    crate::hex(&b)
+}
 pub fn parse(b: &[u8]) -> Result<Vec<Entry>> {
     ensure!(b.len() >= 12, "short PMR");
     let be = if b[..4] == [0, 0, 7, 0xa9] {
@@ -58,10 +69,10 @@ pub fn parse(b: &[u8]) -> Result<Vec<Entry>> {
     let mut out = Vec::new();
     for _ in 0..count {
         out.push(Entry {
-            file_package_uid: crate::hex(r.take(words as usize * 4)?),
+            file_package_uid: uid(r.take(words as usize * 4)?, be),
             filename: r.string()?,
             project: r.string()?,
-            material_source_package_uid: crate::hex(r.take(words as usize * 4)?),
+            material_source_package_uid: uid(r.take(words as usize * 4)?, be),
             timestamp: r.number(4)?,
         });
     }
@@ -81,5 +92,35 @@ mod tests {
         let e = parse(include_bytes!("../../../tests/fixtures/msmFMID.pmr")).unwrap();
         assert_eq!(e.len(), 344);
         assert!(e.iter().all(|e| e.project == "BD Demo Reel"));
+    }
+}
+
+#[cfg(test)]
+mod variants {
+    use super::*;
+    #[test]
+    fn endian_and_short_uids() {
+        for be in [true, false] {
+            let mut b = Vec::new();
+            let word = |v: u32| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+            let short = |v: u16| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+            b.extend(word(0x7a9));
+            b.extend(word(2));
+            b.extend(word(1));
+            b.extend([1; 8]);
+            let name = "Café.mxf";
+            b.extend(short(name.len() as u16));
+            b.extend(name.as_bytes());
+            b.extend(short(0));
+            b.extend([2; 8]);
+            b.extend(word(123));
+            let e = parse(&b).unwrap();
+            assert_eq!(e[0].filename, name);
+            assert_eq!(e[0].timestamp, 123);
+            assert!(e[0].project.is_empty());
+            for n in 0..b.len() {
+                assert!(parse(&b[..n]).is_err());
+            }
+        }
     }
 }

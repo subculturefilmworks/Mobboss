@@ -78,8 +78,38 @@ fn canonical_destination(path: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 impl Index {
+    /// Validate the complete destination before any SQLite or directory writes.
+    pub fn open_for_scan(path: &Path, root: &Path) -> Result<Self> {
+        let root = root.canonicalize()?;
+        let dest = canonical_destination(path)?;
+        ensure!(
+            !dest.starts_with(&root),
+            "index must be outside the scanned media tree"
+        );
+        Self::open(&dest)
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let path = canonical_destination(path)?;
+        for ancestor in path.parent().into_iter().flat_map(Path::ancestors) {
+            ensure!(
+                !ancestor.file_name().is_some_and(|n| n
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("Avid MediaFiles")
+                    || n.to_string_lossy().eq_ignore_ascii_case("OMFI MediaFiles")),
+                "index cannot be inside a media folder"
+            );
+            if ancestor.is_dir() {
+                let entries = fs::read_dir(ancestor)?;
+                for entry in entries {
+                    let entry = entry?;
+                    let p = entry.path();
+                    ensure!(
+                        !(is_ext(&p, "mxf") || is_ext(&p, "pmr") || is_ext(&p, "mdb")),
+                        "index cannot be inside a media folder"
+                    );
+                }
+            }
+        }
         if let Some(p) = path.parent() {
             fs::create_dir_all(p)?;
         }
@@ -129,19 +159,23 @@ impl Index {
         );
         let mut report = ScanReport::default();
         let disk = discover(&root, &mut report.warnings);
-        let folders: BTreeSet<_> = disk
+        let mut folders: BTreeSet<_> = disk
             .iter()
             .filter_map(|p| p.parent().map(Path::to_path_buf))
             .collect();
-        // Reject indexes in any known media folder even if scanning a different root.
-        for ancestor in self.path.ancestors() {
-            ensure!(
-                !ancestor.file_name().is_some_and(|s| s
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case("Avid MediaFiles")
-                    || s.to_string_lossy().eq_ignore_ascii_case("OMFI MediaFiles")),
-                "index cannot be inside a media folder"
-            );
+        // Include database-only directories so missing inventories remain visible.
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if entry.file_type().is_file()
+                && (is_ext(entry.path(), "pmr") || is_ext(entry.path(), "mdb"))
+            {
+                if let Some(p) = entry.path().parent() {
+                    folders.insert(p.to_path_buf());
+                }
+            }
         }
         let prior: BTreeMap<_, _> = self
             .files(None)?
@@ -150,6 +184,7 @@ impl Index {
             .collect();
         let mut database = BTreeMap::new();
         let mut db_folders = BTreeSet::new();
+        let mut pmr_folders = BTreeSet::new();
         for folder in &folders {
             for entry in fs::read_dir(folder)? {
                 let entry = match entry {
@@ -167,6 +202,7 @@ impl Index {
                         .and_then(|b| pmr::parse(&b))
                     {
                         Ok(entries) => {
+                            pmr_folders.insert(folder.clone());
                             for e in entries {
                                 let name = Path::new(&e.filename);
                                 if name.components().count() == 1 {
@@ -178,16 +214,27 @@ impl Index {
                     }
                 } else if is_ext(&p, "mdb") {
                     db_folders.insert(folder.clone());
-                    report.warnings.push(format!(
-                        "{}: MDB inventory is unsupported; using PMR, index and headers",
-                        p.display()
-                    ));
+                    let description = match crate::mdb::inspect(&p) {
+                        Ok(info) => format!(
+                            "Bento TOC at {}, {} bytes",
+                            info.toc_offset, info.toc_length
+                        ),
+                        Err(e) => format!("invalid/unsupported container: {e}"),
+                    };
+                    report.warnings.push(format!("{}: {description}; MDB object inventory is unsupported; using PMR, index and headers",p.display()));
                 }
             }
         }
         let listing: BTreeSet<_> = disk.iter().cloned().collect();
         let mut expected: BTreeSet<_> = database.keys().cloned().collect();
-        expected.extend(prior.keys().filter(|p| p.starts_with(&root)).cloned());
+        expected.extend(
+            prior
+                .keys()
+                .filter(|p| {
+                    p.starts_with(&root) && !p.parent().is_some_and(|f| pmr_folders.contains(f))
+                })
+                .cloned(),
+        );
         report.diff.missing = expected.difference(&listing).cloned().collect();
         report.diff.unlisted = listing.difference(&expected).cloned().collect();
         let mut records = Vec::new();
@@ -213,7 +260,14 @@ impl Index {
             let folder = path.parent().context("file without parent")?.to_path_buf();
             let deep =
                 mode == ScanMode::Deep || (mode == ScanMode::Auto && !db_folders.contains(&folder));
-            let metadata = if !deep && !changed && previous.is_some() {
+            let unknown = previous.is_none_or(|p| {
+                p.metadata.project.is_none() || p.metadata.file_package_uid.is_none()
+            });
+            let db_changed = database.get(&path).zip(previous).is_some_and(|(e, p)| {
+                p.metadata.file_package_uid.as_deref() != Some(e.file_package_uid.as_str())
+                    || p.metadata.project.as_deref() != Some(e.project.as_str())
+            });
+            let metadata = if !deep && !changed && !unknown && !db_changed {
                 report.cached += 1;
                 previous.context("missing cache")?.metadata.clone()
             } else {
@@ -289,7 +343,16 @@ pub fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for e in WalkDir::new(root).follow_links(false) {
         match e {
-            Ok(e) if e.file_type().is_file() && is_ext(e.path(), "mxf") => out.push(e.into_path()),
+            Ok(e) if e.file_type().is_file() && is_ext(e.path(), "mxf") => {
+                if e.path().to_str().is_some() {
+                    out.push(e.into_path())
+                } else {
+                    warnings.push(format!(
+                        "{}: non-UTF-8 path cannot be indexed",
+                        e.path().display()
+                    ));
+                }
+            }
             Ok(_) => {}
             Err(e) => warnings.push(e.to_string()),
         }

@@ -39,20 +39,12 @@ enum Command {
 fn main() -> Result<()> {
     let args = Args::parse();
     let path = args.index.map(Ok).unwrap_or_else(default_index)?;
-    // Validate before opening SQLite so a rejected scan cannot create a database in media.
-    if let Command::Scan { path: root, .. } | Command::Diff { path: root } = &args.command {
-        let root = root.canonicalize()?;
-        let absolute = if path.is_absolute() {
-            path.clone()
-        } else {
-            std::env::current_dir()?.join(&path)
-        };
-        anyhow::ensure!(
-            !absolute.starts_with(root),
-            "index must be outside scanned media tree"
-        );
-    }
-    let mut index = Index::open(&path)?;
+    let mut index = match &args.command {
+        Command::Scan { path: root, .. } | Command::Diff { path: root } => {
+            Index::open_for_scan(&path, root)?
+        }
+        _ => Index::open(&path)?,
+    };
     match args.command {
         Command::Scan { path, mode } => {
             let r = index.scan(

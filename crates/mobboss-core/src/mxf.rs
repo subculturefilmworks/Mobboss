@@ -33,12 +33,21 @@ pub fn ber(b: &[u8]) -> Result<(usize, usize)> {
 struct HeaderReader<R> {
     inner: R,
     end: u64,
+    bytes_read: usize,
 }
 impl<R: Read + Seek> Read for HeaderReader<R> {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
         let remaining = self.end.saturating_sub(self.inner.stream_position()?);
-        let n = b.len().min(remaining.min(usize::MAX as u64) as usize);
-        self.inner.read(&mut b[..n])
+        let n = b
+            .len()
+            .min(remaining.min(usize::MAX as u64) as usize)
+            .min(READ_LIMIT - self.bytes_read);
+        if n == 0 && !b.is_empty() && remaining > 0 {
+            return Err(std::io::Error::other("MXF read budget exceeded"));
+        }
+        let read = self.inner.read(&mut b[..n])?;
+        self.bytes_read += read;
+        Ok(read)
     }
 }
 impl<R: Seek> Seek for HeaderReader<R> {
@@ -79,7 +88,9 @@ struct Set {
 }
 fn text(b: &[u8]) -> String {
     String::from_utf16_lossy(
-        &b.chunks_exact(2)
+        &b.as_chunks::<2>()
+            .0
+            .iter()
             .map(|x| u16::from_be_bytes([x[0], x[1]]))
             .collect::<Vec<_>>(),
     )
@@ -148,6 +159,7 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
             HeaderReader {
                 inner: r.r,
                 end: header_end,
+                bytes_read: r.used,
             },
         ),
     };
@@ -186,7 +198,7 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
                 number(&v[4..8]) == Some(18) && count <= (v.len() - 8) / 18,
                 "invalid primer batch"
             );
-            for x in v[8..8 + count * 18].chunks_exact(18) {
+            for x in v[8..8 + count * 18].as_chunks::<18>().0 {
                 primer.insert(u16::from_be_bytes([x[0], x[1]]), hex(&x[2..]));
             }
         } else if k[4..6] == [2, 0x53] {
@@ -250,7 +262,17 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
             m.sample_rate = field(d, 0x3d03).and_then(rate);
             m.bit_depth = field(d, 0x3301)
                 .or_else(|| field(d, 0x3d01))
-                .and_then(number);
+                .and_then(number)
+                .or_else(|| {
+                    field(d, 0x3401).and_then(|b| {
+                        b.as_chunks::<2>()
+                            .0
+                            .iter()
+                            .take_while(|x| x[0] != 0)
+                            .map(|x| u32::from(x[1]))
+                            .max()
+                    })
+                });
             let audio = m.sample_rate.is_some();
             m.track_kind = Some(
                 if audio {
@@ -280,13 +302,27 @@ pub fn parse<R: Read + Seek>(reader: R) -> Result<MediaMetadata> {
 pub fn codec_name(ul: &str) -> &'static str {
     if ul.starts_with("060e2b340401") && ul.get(16..24) == Some("04010202") {
         match ul.get(24..28) {
-            Some("7127") => "DNxHD",
-            Some("7128") => "DNxHR",
-            Some("0307") => "Uncompressed",
+            Some("7124" | "7125" | "7126" | "7127" | "7128") => "DNxHR",
+            Some("0307") => "DNxUncompressed",
             Some("0306") => "ProRes",
-            Some("0102") => "DV",
+            Some("0201") => "DV",
+            Some("0131" | "0132") => "H.264",
+            Some("0301") => "JPEG 2000",
+            Some("0302") => "DNxHD / DNxHR",
+            Some("0101" | "0102" | "0103" | "0104") => "MPEG-2",
+            Some(v)
+                if v.starts_with("71")
+                    && u8::from_str_radix(&v[2..], 16).is_ok_and(|p| (1..=0x18).contains(&p)) =>
+            {
+                "DNxHD"
+            }
+            Some(v) if v.starts_with("71") => "DNxHD / DNxHR",
             _ => "Unknown",
         }
+    } else if ul.starts_with("060e2b340401") && ul.get(16..28) == Some("0e0402010211") {
+        "ProRes"
+    } else if ul.starts_with("060e2b340401") && ul.get(16..24) == Some("04010201") {
+        "Uncompressed"
     } else if ul.contains("04020201") {
         "PCM"
     } else {
@@ -325,6 +361,105 @@ mod tests {
             assert_eq!(m.track_kind.as_deref(), Some(kind));
             assert!(m.duration.unwrap() > 0);
             assert!(m.edit_rate.unwrap().denominator > 0);
+            if kind == "audio" {
+                assert_eq!(m.codec.as_deref(), Some("PCM"));
+                assert_eq!(m.bit_depth, Some(16));
+            } else if m.codec_ul.as_deref() == Some("060e2b340401010d0401020271270000") {
+                assert_eq!(m.codec.as_deref(), Some("DNxHR"));
+                assert_eq!(m.bit_depth, Some(8));
+            } else {
+                assert_eq!(m.codec.as_deref(), Some("DNxUncompressed"));
+                assert_eq!(m.bit_depth, Some(16));
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    use std::io::Cursor;
+    #[test]
+    fn primer_remapping() {
+        let mut b = include_bytes!("../../../tests/fixtures/video.header").to_vec();
+        let project_ul = [
+            0xa5, 0xfb, 0x7b, 0x25, 0xf6, 0x15, 0x94, 0xb9, 0x62, 0xfc, 0x37, 0x17, 0x49, 0x2d,
+            0x42, 0xbf,
+        ];
+        let mut pos = 0;
+        let mut primer_seen = false;
+        while pos + 17 <= b.len() {
+            let (n, l) = ber(&b[pos + 16..]).unwrap();
+            let start = pos + 16 + l;
+            let end = start + n;
+            if hex(&b[pos..pos + 16]) == PRIMER {
+                for i in (start + 8..end).step_by(18) {
+                    if b[i + 2..i + 18] == project_ul {
+                        b[i..i + 2].copy_from_slice(&[0xfe, 0x12]);
+                        primer_seen = true;
+                    }
+                }
+            } else if b[pos + 4..pos + 6] == [2, 0x53] {
+                let mut i = start;
+                while i + 4 <= end {
+                    let n = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
+                    if b[i..i + 2] == [0xff, 0xfd] {
+                        b[i..i + 2].copy_from_slice(&[0xfe, 0x12]);
+                    }
+                    i += 4 + n;
+                }
+            }
+            pos = end;
+        }
+        assert!(primer_seen);
+        assert_eq!(
+            parse(Cursor::new(b)).unwrap().project.as_deref(),
+            Some("BD Demo Reel")
+        );
+    }
+    #[test]
+    fn corrupt_prefixes_do_not_panic() {
+        let b = include_bytes!("../../../tests/fixtures/video.header");
+        for n in (0..b.len()).step_by(997) {
+            assert!(parse(Cursor::new(&b[..n])).is_err());
+        }
+    }
+    #[test]
+    fn essence_value_never_read() {
+        struct Guard {
+            c: Cursor<Vec<u8>>,
+            limit: u64,
+            read: usize,
+        }
+        impl Read for Guard {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                assert!(self.c.position() <= self.limit);
+                assert!(
+                    self.c.position() + b.len() as u64 <= self.limit,
+                    "attempted essence read"
+                );
+                let n = self.c.read(b)?;
+                self.read += n;
+                assert!(self.read <= READ_LIMIT);
+                Ok(n)
+            }
+        }
+        impl Seek for Guard {
+            fn seek(&mut self, p: SeekFrom) -> std::io::Result<u64> {
+                self.c.seek(p)
+            }
+        }
+        let mut b = include_bytes!("../../../tests/fixtures/video.header").to_vec();
+        let limit = b.len() as u64;
+        let declared = limit - 129;
+        b[57..65].copy_from_slice(&declared.to_be_bytes());
+        b.extend([0x55; 100]);
+        let m = parse(Guard {
+            c: Cursor::new(b),
+            limit,
+            read: 0,
+        })
+        .unwrap();
+        assert_eq!(m.project.as_deref(), Some("BD Demo Reel"));
     }
 }
