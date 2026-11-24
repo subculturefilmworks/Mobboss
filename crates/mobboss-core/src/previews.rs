@@ -885,7 +885,7 @@ pub fn audio_files(clip: &Clip) -> Vec<&MediaFile> {
         })
         .collect()
 }
-fn proxy_inputs<'a>(
+pub(crate) fn proxy_inputs<'a>(
     clip: &'a Clip,
     tracks: &[usize],
 ) -> Result<(Option<&'a MediaFile>, Vec<&'a MediaFile>)> {
@@ -927,7 +927,7 @@ pub fn proxy_key(clip: &Clip, tracks: &[usize], platform: ProxyPlatform) -> Resu
     }
     Ok(hash.finalize().to_hex().to_string())
 }
-fn tc_seconds(file: &MediaFile) -> Option<f64> {
+pub(crate) fn tc_seconds(file: &MediaFile) -> Option<f64> {
     let m = &file.metadata;
     let rate = m
         .timecode_rate
@@ -1065,7 +1065,7 @@ fn encoder_choice_key(ffmpeg: &Ffmpeg) -> Result<String> {
 }
 impl PreviewCache {
     /// Persist only a binary fingerprint and container, never machine names or source paths.
-    fn windows_choice(&self, ffmpeg: &Ffmpeg) -> ProxyPlatform {
+    pub(crate) fn windows_choice(&self, ffmpeg: &Ffmpeg) -> ProxyPlatform {
         let path = self.root.join("windows-encoder.txt");
         if fs::symlink_metadata(&path).is_ok_and(|s| s.is_file() && s.len() < 128) {
             if let (Ok(key), Ok(choice)) = (encoder_choice_key(ffmpeg), fs::read_to_string(path)) {
@@ -1076,7 +1076,11 @@ impl PreviewCache {
         }
         ProxyPlatform::Windows
     }
-    fn remember_windows_choice(&self, ffmpeg: &Ffmpeg, profile: ProxyPlatform) -> Result<()> {
+    pub(crate) fn remember_windows_choice(
+        &self,
+        ffmpeg: &Ffmpeg,
+        profile: ProxyPlatform,
+    ) -> Result<()> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let temp = self.root.join(format!(
             ".windows-encoder-{}-{}.tmp",
@@ -1176,6 +1180,22 @@ impl PreviewCache {
     }
 }
 impl PreviewCache {
+    /// Upgrade from file proxies to memory streaming. Keep JPEGs and encoder preferences.
+    /// Only recognized, regular cache outputs are removed; never follow symlinks.
+    pub fn remove_legacy_proxies(&self) -> Result<()> {
+        for (path, _, _) in self.entries()? {
+            if path.extension().is_some_and(|e| e == "mp4" || e == "webm") {
+                self.io("remove legacy proxy", &[&path], || {
+                    retry_partial_cleanup(
+                        || fs::remove_file(&path),
+                        std::thread::sleep,
+                        cfg!(windows),
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
     pub fn proxy(
         &self,
         ffmpeg: &Ffmpeg,
@@ -1607,6 +1627,23 @@ mod proxy_tests {
             .unwrap();
         assert_eq!(hit, Some(path.clone()));
         assert_eq!(fs::read(path).unwrap(), b"completed preview");
+    }
+    #[test]
+    fn streaming_upgrade_removes_only_recognized_proxies_and_keeps_posters() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = PreviewCache::open(dir.path()).unwrap();
+        for extension in ["jpg", "mp4", "webm"] {
+            fs::write(cache.path(&"a".repeat(64), extension).unwrap(), "data").unwrap();
+        }
+        fs::write(dir.path().join("unrelated.mp4"), "keep").unwrap();
+        fs::write(dir.path().join("windows-encoder.txt"), "keep").unwrap();
+        cache.remove_legacy_proxies().unwrap();
+        cache.remove_legacy_proxies().unwrap();
+        assert!(cache.path(&"a".repeat(64), "jpg").unwrap().is_file());
+        assert!(!cache.path(&"a".repeat(64), "mp4").unwrap().exists());
+        assert!(!cache.path(&"a".repeat(64), "webm").unwrap().exists());
+        assert!(dir.path().join("unrelated.mp4").is_file());
+        assert!(dir.path().join("windows-encoder.txt").is_file());
     }
     #[test]
     fn partial_cleanup_backoff_is_bounded_and_windows_only() {

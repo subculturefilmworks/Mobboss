@@ -99,26 +99,30 @@ function validate(binary, platform) {
     "dnxhd",
     "pcm_s16le",
     "pcm_s24le",
-    ...(platform === "windows" ? ["vp8", "opus"] : []),
+    "h264",
+    "aac",
+    "pcm_s16le",
+    ...(platform === "windows" ? ["vp8", "vp9", "opus"] : []),
   ])
     if (!new RegExp(`\\b${name}\\b`).test(decoders))
       throw new Error(`ffmpeg missing decoder ${name}`);
   for (const name of [
     "mjpeg",
     "aac",
+    "pcm_s16le",
     ...(platform === "windows"
-      ? ["h264_mf", "libvpx", "libopus"]
+      ? ["h264_mf", "libvpx", "libvpx-vp9", "libopus"]
       : ["h264_videotoolbox"]),
   ])
     if (!new RegExp(`\\b${name}\\b`).test(encoders))
       throw new Error(`ffmpeg missing encoder ${name}`);
   for (const [flag, names] of [
-    ["-demuxers", ["mxf"]],
+    ["-demuxers", ["mxf", "mov"]],
     [
       "-muxers",
       platform === "windows"
-        ? ["mp4", "image2", "webm", "null"]
-        : ["mp4", "image2"],
+        ? ["mp4", "image2", "webm", "null", "s16le"]
+        : ["mp4", "image2", "s16le"],
     ],
     [
       "-filters",
@@ -288,12 +292,12 @@ async function macArch(arch) {
     "--disable-ffprobe",
     "--disable-ffplay",
     "--enable-protocol=file,pipe",
-    "--enable-demuxer=mxf",
-    "--enable-decoder=dnxhd,rawvideo,pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be",
-    "--enable-parser=dnxhd,dnxuc",
-    "--enable-encoder=mjpeg,h264_videotoolbox,aac",
+    "--enable-demuxer=mxf,mov",
+    "--enable-decoder=dnxhd,rawvideo,h264,aac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be",
+    "--enable-parser=dnxhd,dnxuc,h264,aac",
+    "--enable-encoder=mjpeg,h264_videotoolbox,aac,pcm_s16le",
     "--enable-videotoolbox",
-    "--enable-muxer=image2,mp4",
+    "--enable-muxer=image2,mp4,s16le",
     "--enable-filter=scale,format,split,lutrgb,overlay,aresample,pan,amerge,apad,atrim,asetpts,setpts,adelay,null,anull,aformat,anullsrc,nullsink,anullsink,trim,buffer,abuffer,buffersink,abuffersink",
     "--enable-swscale",
     "--enable-swresample",

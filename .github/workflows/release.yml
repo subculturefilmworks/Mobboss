@@ -46,7 +46,7 @@ jobs:
           else
             node scripts/fetch-ffmpeg.mjs --target x86_64-pc-windows-msvc
           fi
-      - name: Smoke test bundled posters and stereo proxies (Windows WebM fallback required)
+      - name: Smoke test posters, first stream fragment, seek timestamps and stereo decode
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
@@ -55,8 +55,9 @@ jobs:
             export MOBBOSS_FFMPEG="$(cygpath -w "$PWD/apps/desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe")"
           fi
           export MOBBOSS_REQUIRE_CODEC_SMOKE=1
-          cargo test -p mobboss-core --lib previews:: -- --nocapture
+          cargo test -p mobboss-core --lib -- --nocapture
           cargo test -p mobboss-core --test bundled_previews -- --nocapture
+          cargo test -p mobboss-core --test streaming -- --nocapture
       - name: Build unsigned universal Mac app and disk image
         if: runner.os == 'macOS'
         run: npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
