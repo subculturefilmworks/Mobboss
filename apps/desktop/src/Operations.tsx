@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { bytes, type MediaFile } from "./model";
+import { bytes, requiresDestination, type MediaFile } from "./model";
 type Op = "move" | "copy" | "collect";
 interface Action {
   op: Op;
@@ -93,7 +93,7 @@ export default function Operations({
           setResult(e.payload.Ok!);
           setStage("result");
         }
-        await onRefresh();
+        await onRefresh().catch((e) => onError(String(e)));
       }),
     ];
     return () => {
@@ -182,6 +182,10 @@ export default function Operations({
       throw e;
     }
   }
+  const operationFiles = selected.size
+    ? files.filter((f) => selected.has(f.path))
+    : files.filter((f) => (f.metadata.project || "Unknown") === project);
+  const needsDestination = requiresDestination(operationFiles);
   const blocked = (plan?.drives || undo?.drives || []).some(
     (d) => d.available < d.required,
   );
@@ -255,7 +259,7 @@ export default function Operations({
                 </p>
                 {
                   <label>
-                    {op === "copy"
+                    {op === "copy" || needsDestination
                       ? "Destination root (required)"
                       : op === "move"
                         ? "Optional destination root (defaults to each source drive)"
@@ -282,11 +286,21 @@ export default function Operations({
                     </div>
                   </label>
                 }
+                {needsDestination && (
+                  <p className="hint">
+                    Some selected media is outside an Avid MediaFiles tree.
+                    Choose a destination root explicitly; Collect will move that
+                    media directly into the selected root’s project collection.
+                  </p>
+                )}
                 <div className="modal-actions">
                   <button onClick={() => setStage("")}>Cancel</button>
                   <button
                     className="primary"
-                    disabled={!name.trim() || (op === "copy" && !destination)}
+                    disabled={
+                      !name.trim() ||
+                      ((op === "copy" || needsDestination) && !destination)
+                    }
                     onClick={() => act(preview)}
                   >
                     Build dry-run plan

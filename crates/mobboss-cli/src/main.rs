@@ -32,6 +32,9 @@ struct TransferArgs {
     /// Execute the displayed plan. Quit Media Composer first.
     #[arg(long)]
     yes: bool,
+    /// Emit the complete machine-readable plan/result instead of a readable summary.
+    #[arg(long)]
+    json: bool,
     /// Optional indexed paths; omit to use the entire project.
     #[arg(long = "file")]
     files: Vec<PathBuf>,
@@ -48,6 +51,8 @@ enum Command {
         log: PathBuf,
         #[arg(long)]
         yes: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Scan a folder recursively without changing media.
     Scan {
@@ -111,30 +116,53 @@ fn main() -> Result<()> {
                 &a.files,
                 a.dest.as_deref(),
             )?;
-            println!("{}", serde_json::to_string_pretty(&plan)?);
+            if a.json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                println!("{}", plan_summary(&plan));
+            }
             eprintln!("Quit Media Composer before moving media. Avid will rebuild its media databases on next launch.");
             if a.yes && !preview {
                 let data = default_index()?.parent().unwrap().to_path_buf();
                 let result = mobboss_core::ops::execute(&mut index, &plan, &data, &cancel, |p| {
                     eprintln!("{} / {}  {}", p.done, p.total, p.source.display())
                 })?;
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                if a.json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", outcome_summary(&result));
+                }
             } else {
                 eprintln!("Dry run only. Use move/copy/collect --yes to execute.");
             }
         }
-        Command::Undo { log, yes } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&mobboss_core::ops::preview_undo(&index, &log)?)?
-            );
+        Command::Undo { log, yes, json } => {
+            let preview = mobboss_core::ops::preview_undo(&index, &log)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&preview)?);
+            } else {
+                println!(
+                    "Dry-run undo: {} actions in reverse order ({} moves, {} copies)",
+                    preview.rows.len(),
+                    preview.rows.iter().filter(|r| r.op == "move").count(),
+                    preview.rows.iter().filter(|r| r.op == "copy").count()
+                );
+                println!("{}", drive_summary(&preview.drives));
+                for warning in preview.warnings {
+                    println!("Warning: {warning}");
+                }
+            }
             eprintln!("Quit Media Composer before undo. Copies are deleted only if their checksum still matches.");
             if yes {
                 let data = default_index()?.parent().unwrap().to_path_buf();
                 let result = mobboss_core::ops::undo(&mut index, &log, &data, &cancel, |p| {
                     eprintln!("{} / {}", p.done, p.total)
                 })?;
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", outcome_summary(&result));
+                }
             } else {
                 eprintln!("Dry run only. Pass --yes to undo.");
             }
@@ -227,4 +255,140 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn display_bytes(value: u64) -> String {
+    if value >= 1024 * 1024 * 1024 {
+        format!(
+            "{:.2} GiB ({value} bytes)",
+            value as f64 / (1024.0 * 1024.0 * 1024.0)
+        )
+    } else {
+        format!(
+            "{:.2} MiB ({value} bytes)",
+            value as f64 / (1024.0 * 1024.0)
+        )
+    }
+}
+fn drive_summary(drives: &[mobboss_core::plan::DriveSummary]) -> String {
+    use std::fmt::Write;
+    let mut text = String::new();
+    for drive in drives {
+        let _ = writeln!(
+            text,
+            "{}\n  {} files · {}\n  Free: {}\n  Required with margin: {}{}",
+            drive.root.display(),
+            drive.files,
+            display_bytes(drive.bytes),
+            display_bytes(drive.available),
+            display_bytes(drive.required),
+            if drive.available < drive.required {
+                " — BLOCKED: insufficient space"
+            } else {
+                ""
+            }
+        );
+    }
+    text
+}
+fn plan_summary(plan: &mobboss_core::plan::Plan) -> String {
+    use std::fmt::Write;
+    let mut text = format!("Dry-run plan: {}\n", plan.project);
+    let steps: std::collections::BTreeSet<_> = plan.actions.iter().map(|a| a.step).collect();
+    for step in steps {
+        let actions: Vec<_> = plan.actions.iter().filter(|a| a.step == step).collect();
+        let name = if actions[0].op == mobboss_core::plan::Operation::Move {
+            "Move"
+        } else {
+            "Copy"
+        };
+        let _ = writeln!(
+            text,
+            "Step {}: {name} {} files ({} duplicate skips)",
+            step + 1,
+            actions.len(),
+            actions.iter().filter(|a| a.duplicate).count()
+        );
+    }
+    text.push_str(&drive_summary(&plan.drives));
+    for warning in &plan.warnings {
+        let _ = writeln!(text, "Warning: {warning}");
+    }
+    if plan.conflicts.is_empty() {
+        text.push_str("Conflicts: none\n");
+    }
+    for conflict in &plan.conflicts {
+        let _ = writeln!(text, "Conflict: {conflict}");
+    }
+    text
+}
+fn outcome_summary(result: &mobboss_core::ops::Outcome) -> String {
+    let mut text = format!(
+        "{} completed · {} skipped{}\n",
+        result.completed,
+        result.skipped,
+        if result.cancelled {
+            " · cancelled"
+        } else {
+            ""
+        }
+    );
+    for warning in &result.warnings {
+        text.push_str(&format!("Warning: {warning}\n"));
+    }
+    for folder in &result.touched {
+        text.push_str(&format!("Touched: {}\n", folder.display()));
+    }
+    for log in &result.logs {
+        text.push_str(&format!("Log: {}\n", log.display()));
+    }
+    text
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn json_is_opt_in_for_transfers_and_undo() {
+        let args = Args::try_parse_from(["mobboss", "copy", "--project", "Film", "--dest", "/tmp"])
+            .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::Copy(TransferArgs { json: false, .. })
+        ));
+        let args = Args::try_parse_from([
+            "mobboss",
+            "plan",
+            "--project",
+            "Film",
+            "--dest",
+            "/tmp",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Command::Plan(TransferArgs { json: true, .. })
+        ));
+        assert!(Args::try_parse_from(["mobboss", "undo", "log.csv", "--json"]).is_ok());
+    }
+    #[test]
+    fn readable_summary_includes_space_and_refusal() {
+        let summary = drive_summary(&[mobboss_core::plan::DriveSummary {
+            root: "/shuttle".into(),
+            files: 3,
+            bytes: 10,
+            required: 20,
+            available: 5,
+        }]);
+        for expected in [
+            "/shuttle",
+            "3 files",
+            "10 bytes",
+            "Free:",
+            "Required with margin:",
+            "BLOCKED",
+        ] {
+            assert!(summary.contains(expected));
+        }
+    }
 }
