@@ -38,3 +38,25 @@ Three complete, unmodified exported rows are in [sample-rows.json](sample-rows.j
 | Untitled.new.01 | DNxUncompressed alpha | 24000/1001 | 1 | 0.0417083 |
 
 The audio duration is in samples; the video durations are in frames. Duration seconds = units × rate denominator / rate numerator.
+
+## Phase 2: progressive inventory and parallel headers (2026-11-23)
+
+`benchmark_scan` runs actual Quick scans against the read-only sample with a fresh SQLite index in `/tmp` for each run. Every run identified and enriched all **344 files**, all project **BD Demo Reel**, and read **344 headers**. The first callback containing rows was the inventory callback, before any header jobs started. It included all 344 project names and PMR file UIDs; codec/rate/duration followed as verified header results.
+
+```sh
+cargo run --release -p mobboss-core --example benchmark_scan -- <sample-folder>
+cargo run --release -p mobboss-core --example benchmark_scan -- <sample-folder> 16,8,4,1
+```
+
+| Workers | First PMR inventory, pass A | Fully enriched, pass A | First PMR inventory, pass B | Fully enriched, pass B |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.086 s | 30.904 s | 0.051 s | 5.179 s |
+| 4 | 0.062 s | 26.945 s | 0.093 s | 4.536 s |
+| 8 | 0.053 s | 12.732 s | 0.045 s | 4.498 s |
+| 16 | 0.052 s | 6.090 s | 0.147 s | 13.033 s |
+
+Pass A ran in ascending order (1/4/8/16); pass B later ran in descending order (16/8/4/1). **Cold index does not mean cold NAS/OS cache.** Neither pass flushed client/server caches, and their state cannot be established. Earlier parser probes and tests had accessed the sample; sample integration validation may also have overlapped early pass A. Pass B had no intentional concurrent sample scans. NAS/server load was uncontrolled. The slower first run in each order and faster later runs demonstrate why pass A alone cannot establish a 5× concurrency speedup. These are honest end-to-end observations, not a controlled throughput experiment. The default remains a conservative 8 simultaneous reads; 16 is available for measurement on the user's storage.
+
+Each header reader retains its 512 KiB maximum I/O budget and never reads essence. The worker count is limited to 1–64, with a bounded completion queue (2× workers). Cancellation is checked while discovering/planning and between header jobs; in-flight OS reads must finish. Cancellation does not commit the current root's provisional data. UI events are coalesced on a 100 ms timer to avoid a full table update for every header. The measured first-result times above refer to the core callback, excluding UI startup/rendering and this coalescing interval.
+
+The old Phase 1 profile above remains historical context; Phase 2 implements the previously deferred bounded parallel reads.

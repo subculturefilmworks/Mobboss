@@ -1,11 +1,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use mobboss_core::{default_index, Index, ScanMode};
+use mobboss_core::{default_index, CancellationToken, Index, ScanMode, ScanOptions};
 use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about = "Mob Boss — read-only Avid media inventory")]
 struct Args {
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "SQLite index location, outside media folders"
+    )]
     index: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -18,21 +22,38 @@ enum Mode {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Scan a folder recursively without changing media.
     Scan {
+        /// Folder or mounted drive to inventory.
         path: PathBuf,
-        #[arg(long, value_enum, default_value = "auto")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "auto",
+            help = "Quick uses cache/PMR, auto adapts per folder, deep verifies every header"
+        )]
         mode: Mode,
+        /// Maximum simultaneous header reads (1–64).
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
     },
+    /// List indexed projects and file counts.
     Projects,
+    /// List or export indexed media.
     Files {
         #[arg(long)]
+        /// Restrict results to this project name.
         project: Option<String>,
         #[arg(long, conflicts_with = "csv")]
+        /// Export complete metadata as JSON.
         json: bool,
         #[arg(long)]
+        /// Export table rows as CSV.
         csv: bool,
     },
+    /// Compare disk with PMR or the prior index and refresh the index.
     Diff {
+        /// Folder to compare.
         path: PathBuf,
     },
 }
@@ -46,14 +67,23 @@ fn main() -> Result<()> {
         _ => Index::open(&path)?,
     };
     match args.command {
-        Command::Scan { path, mode } => {
-            let r = index.scan(
+        Command::Scan {
+            path,
+            mode,
+            concurrency,
+        } => {
+            let r = index.scan_with(
                 &path,
-                match mode {
-                    Mode::Quick => ScanMode::Quick,
-                    Mode::Auto => ScanMode::Auto,
-                    Mode::Deep => ScanMode::Deep,
+                &ScanOptions {
+                    concurrency,
+                    mode: match mode {
+                        Mode::Quick => ScanMode::Quick,
+                        Mode::Auto => ScanMode::Auto,
+                        Mode::Deep => ScanMode::Deep,
+                    },
                 },
+                &CancellationToken::default(),
+                |_| {},
             )?;
             for w in &r.warnings {
                 eprintln!("warning: {w}");

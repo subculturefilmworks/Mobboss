@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mobboss-core", "crates/mobboss-cli"]
+members = ["crates/mobboss-core", "crates/mobboss-cli", "apps/desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]

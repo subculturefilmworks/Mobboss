@@ -7,6 +7,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Arc,
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
@@ -41,6 +45,47 @@ pub struct ScanReport {
     pub diff: Diff,
     pub warnings: Vec<String>,
 }
+/// Shared cancellation flag. Cancellation leaves the committed index unchanged.
+#[derive(Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+impl CancellationToken {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    pub mode: ScanMode,
+    pub concurrency: usize,
+}
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            mode: ScanMode::Auto,
+            concurrency: 8,
+        }
+    }
+}
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanPhase {
+    Discovery,
+    Inventory,
+    Enrichment,
+    Complete,
+}
+#[derive(Debug, Serialize, Clone)]
+pub struct ScanProgress {
+    pub phase: ScanPhase,
+    pub done: usize,
+    pub total: usize,
+    pub current_folder: PathBuf,
+    /// Inventory rows are provisional; enrichment rows are verified by MXF headers.
+    pub files: Vec<MediaFile>,
+}
 pub struct Index {
     conn: Connection,
     path: PathBuf,
@@ -52,6 +97,12 @@ pub fn default_index() -> Result<PathBuf> {
         .join("index.sqlite"))
 }
 fn canonical_destination(path: &Path) -> Result<PathBuf> {
+    ensure!(
+        !path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir),
+        "destination cannot contain parent traversal (..) components"
+    );
     if path.exists() {
         return Ok(path.canonicalize()?);
     }
@@ -77,39 +128,45 @@ fn canonical_destination(path: &Path) -> Result<PathBuf> {
     }
     Ok(dest)
 }
+/// Canonicalize and reject destinations in known media directories before any writes.
+pub fn validate_destination(path: &Path) -> Result<PathBuf> {
+    let path = canonical_destination(path)?;
+    for ancestor in path.parent().into_iter().flat_map(Path::ancestors) {
+        ensure!(
+            !ancestor.file_name().is_some_and(|n| n
+                .to_string_lossy()
+                .eq_ignore_ascii_case("Avid MediaFiles")
+                || n.to_string_lossy().eq_ignore_ascii_case("OMFI MediaFiles")),
+            "index cannot be inside a media folder"
+        );
+        if ancestor.is_dir() {
+            let entries = fs::read_dir(ancestor)?;
+            for entry in entries {
+                let entry = entry?;
+                let p = entry.path();
+                ensure!(
+                    !(is_ext(&p, "mxf") || is_ext(&p, "pmr") || is_ext(&p, "mdb")),
+                    "index cannot be inside a media folder"
+                );
+            }
+        }
+    }
+    Ok(path)
+}
 impl Index {
     /// Validate the complete destination before any SQLite or directory writes.
     pub fn open_for_scan(path: &Path, root: &Path) -> Result<Self> {
         let root = root.canonicalize()?;
         let dest = canonical_destination(path)?;
         ensure!(
-            !dest.starts_with(&root),
+            !dest.starts_with(&root) || root.parent().is_none(),
             "index must be outside the scanned media tree"
         );
         Self::open(&dest)
     }
     pub fn open(path: &Path) -> Result<Self> {
         let path = canonical_destination(path)?;
-        for ancestor in path.parent().into_iter().flat_map(Path::ancestors) {
-            ensure!(
-                !ancestor.file_name().is_some_and(|n| n
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case("Avid MediaFiles")
-                    || n.to_string_lossy().eq_ignore_ascii_case("OMFI MediaFiles")),
-                "index cannot be inside a media folder"
-            );
-            if ancestor.is_dir() {
-                let entries = fs::read_dir(ancestor)?;
-                for entry in entries {
-                    let entry = entry?;
-                    let p = entry.path();
-                    ensure!(
-                        !(is_ext(&p, "mxf") || is_ext(&p, "pmr") || is_ext(&p, "mdb")),
-                        "index cannot be inside a media folder"
-                    );
-                }
-            }
-        }
+        validate_destination(&path)?;
         if let Some(p) = path.parent() {
             fs::create_dir_all(p)?;
         }
@@ -118,8 +175,15 @@ impl Index {
         Ok(Self { conn, path })
     }
     pub fn files(&self, project: Option<&str>) -> Result<Vec<MediaFile>> {
-        let mut q=self.conn.prepare("SELECT path,folder,size,modified_ns,metadata FROM files WHERE present=1 AND (?1 IS NULL OR project=?1) ORDER BY path")?;
-        let rows = q.query_map([project], |r| {
+        self.read_files(project, false)
+    }
+    /// Retained rows include files marked absent by prior scans.
+    pub fn files_including_absent(&self) -> Result<Vec<MediaFile>> {
+        self.read_files(None, true)
+    }
+    fn read_files(&self, project: Option<&str>, include_absent: bool) -> Result<Vec<MediaFile>> {
+        let mut q=self.conn.prepare("SELECT path,folder,size,modified_ns,metadata FROM files WHERE (present=1 OR ?2) AND (?1 IS NULL OR project=?1) ORDER BY path")?;
+        let rows = q.query_map(params![project, include_absent], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -131,12 +195,19 @@ impl Index {
         let mut out = Vec::new();
         for row in rows {
             let (p, f, size, modified_ns, m) = row?;
+            let mut metadata: MediaMetadata = serde_json::from_str(&m)?;
+            if let Some(ul) = &metadata.codec_ul {
+                let label = mxf::codec_label(ul, metadata.edit_rate.as_ref());
+                if label != "Unknown" {
+                    metadata.codec = Some(label);
+                }
+            }
             out.push(MediaFile {
                 path: p.into(),
                 folder: f.into(),
                 size,
                 modified_ns,
-                metadata: serde_json::from_str(&m)?,
+                metadata,
             });
         }
         Ok(out)
@@ -150,15 +221,45 @@ impl Index {
         Ok(out)
     }
     pub fn scan(&mut self, root: &Path, mode: ScanMode) -> Result<ScanReport> {
+        self.scan_with(
+            root,
+            &ScanOptions {
+                mode,
+                ..ScanOptions::default()
+            },
+            &CancellationToken::default(),
+            |_| {},
+        )
+    }
+    pub fn scan_with(
+        &mut self,
+        root: &Path,
+        options: &ScanOptions,
+        cancel: &CancellationToken,
+        mut progress: impl FnMut(ScanProgress),
+    ) -> Result<ScanReport> {
+        ensure!(
+            (1..=64).contains(&options.concurrency),
+            "concurrency must be between 1 and 64"
+        );
+        let mode = options.mode;
         let started = Instant::now();
+        ensure!(!cancel.is_cancelled(), "scan cancelled");
+        progress(ScanProgress {
+            phase: ScanPhase::Discovery,
+            done: 0,
+            total: 0,
+            current_folder: root.to_path_buf(),
+            files: vec![],
+        });
         let root = root.canonicalize()?;
         ensure!(root.is_dir(), "scan root must be a directory");
         ensure!(
-            !self.path.starts_with(&root),
+            !self.path.starts_with(&root) || root.parent().is_none(),
             "index must be outside the scanned media tree"
         );
         let mut report = ScanReport::default();
-        let disk = discover(&root, &mut report.warnings);
+        let disk = discover_with_cancel(&root, &mut report.warnings, cancel)?;
         let mut folders: BTreeSet<_> = disk
             .iter()
             .filter_map(|p| p.parent().map(Path::to_path_buf))
@@ -169,6 +270,7 @@ impl Index {
             .into_iter()
             .flatten()
         {
+            ensure!(!cancel.is_cancelled(), "scan cancelled");
             if entry.file_type().is_file()
                 && (is_ext(entry.path(), "pmr") || is_ext(entry.path(), "mdb"))
             {
@@ -186,6 +288,7 @@ impl Index {
         let mut db_folders = BTreeSet::new();
         let mut pmr_folders = BTreeSet::new();
         for folder in &folders {
+            ensure!(!cancel.is_cancelled(), "scan cancelled");
             for entry in fs::read_dir(folder)? {
                 let entry = match entry {
                     Ok(e) => e,
@@ -238,7 +341,10 @@ impl Index {
         report.diff.missing = expected.difference(&listing).cloned().collect();
         report.diff.unlisted = listing.difference(&expected).cloned().collect();
         let mut records = Vec::new();
+        let mut jobs = Vec::new();
+        let mut inventory = Vec::new();
         for path in disk {
+            ensure!(!cancel.is_cancelled(), "scan cancelled");
             let stat = match fs::metadata(&path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -267,38 +373,102 @@ impl Index {
                 p.metadata.file_package_uid.as_deref() != Some(e.file_package_uid.as_str())
                     || p.metadata.project.as_deref() != Some(e.project.as_str())
             });
-            let metadata = if !deep && !changed && !unknown && !db_changed {
-                report.cached += 1;
-                previous.context("missing cache")?.metadata.clone()
-            } else {
-                report.headers_read += 1;
-                match mxf::read(&path) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        report.warnings.push(format!("{}: {e:#}", path.display()));
-                        continue;
-                    }
-                }
-            };
-            if let Some(e) = database.get(&path) {
-                if metadata.project.as_deref() != Some(e.project.as_str()) {
-                    report.warnings.push(format!(
-                        "{}: PMR project differs from MXF header",
-                        path.display()
-                    ));
-                }
-            }
-            *report
-                .projects
-                .entry(metadata.project.clone().unwrap_or_else(|| "Unknown".into()))
-                .or_default() += 1;
-            records.push(MediaFile {
-                path,
+            let mut file = MediaFile {
+                path: path.clone(),
                 folder,
                 size: stat.len(),
                 modified_ns: stamp,
-                metadata,
-            });
+                metadata: MediaMetadata::default(),
+            };
+            if !deep && !changed && !unknown && !db_changed {
+                report.cached += 1;
+                file.metadata = previous.context("missing cache")?.metadata.clone();
+                inventory.push(file.clone());
+                records.push(file);
+            } else {
+                if !deep {
+                    if let Some(e) = database.get(&path) {
+                        file.metadata.project = Some(e.project.clone());
+                        file.metadata.file_package_uid = Some(e.file_package_uid.clone());
+                        // PMR's source UID is not necessarily the material package UID.
+                        inventory.push(file.clone());
+                    }
+                }
+                jobs.push(file);
+            }
+        }
+        let total = records.len() + jobs.len();
+        progress(ScanProgress {
+            phase: ScanPhase::Inventory,
+            done: inventory.len(),
+            total,
+            current_folder: root.clone(),
+            files: inventory,
+        });
+        let next = AtomicUsize::new(0);
+        let mut done = records.len();
+        std::thread::scope(|scope| {
+            let (send, receive) = mpsc::sync_channel(options.concurrency * 2);
+            for _ in 0..options.concurrency.min(jobs.len()) {
+                let send = send.clone();
+                let jobs = &jobs;
+                let next = &next;
+                scope.spawn(move || {
+                    while !cancel.is_cancelled() {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(file) = jobs.get(i) else { break };
+                        let result = mxf::read(&file.path);
+                        if send.send((i, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(send);
+            for (i, result) in receive {
+                report.headers_read += 1;
+                done += 1;
+                let mut file = jobs[i].clone();
+                let mut update = Vec::new();
+                match result {
+                    Ok(metadata) => {
+                        if let Some(e) = database.get(&file.path) {
+                            if metadata.project.as_deref() != Some(e.project.as_str()) {
+                                report.warnings.push(format!(
+                                    "{}: PMR project differs from MXF header",
+                                    file.path.display()
+                                ));
+                            }
+                        }
+                        file.metadata = metadata;
+                        update.push(file.clone());
+                        records.push(file.clone());
+                    }
+                    Err(e) => report
+                        .warnings
+                        .push(format!("{}: {e:#}", file.path.display())),
+                }
+                progress(ScanProgress {
+                    phase: ScanPhase::Enrichment,
+                    done,
+                    total,
+                    current_folder: file.folder,
+                    files: update,
+                });
+            }
+        });
+        ensure!(!cancel.is_cancelled(), "scan cancelled");
+        records.sort_by(|a, b| a.path.cmp(&b.path));
+        for file in &records {
+            *report
+                .projects
+                .entry(
+                    file.metadata
+                        .project
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".into()),
+                )
+                .or_default() += 1;
         }
         report.files = records.len();
         report.elapsed_seconds = started.elapsed().as_secs_f64();
@@ -331,6 +501,13 @@ impl Index {
             ],
         )?;
         tx.commit()?;
+        progress(ScanProgress {
+            phase: ScanPhase::Complete,
+            done: report.files,
+            total,
+            current_folder: root,
+            files: vec![],
+        });
         Ok(report)
     }
 }
@@ -340,8 +517,16 @@ fn is_ext(p: &Path, ext: &str) -> bool {
 }
 /// Recursion also handles arbitrary MXF folders, nested workspaces, host.N and OMFI layouts.
 pub fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    discover_with_cancel(root, warnings, &CancellationToken::default()).unwrap_or_default()
+}
+fn discover_with_cancel(
+    root: &Path,
+    warnings: &mut Vec<String>,
+    cancel: &CancellationToken,
+) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for e in WalkDir::new(root).follow_links(false) {
+        ensure!(!cancel.is_cancelled(), "scan cancelled");
         match e {
             Ok(e) if e.file_type().is_file() && is_ext(e.path(), "mxf") => {
                 if e.path().to_str().is_some() {
@@ -358,5 +543,5 @@ pub fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out
+    Ok(out)
 }

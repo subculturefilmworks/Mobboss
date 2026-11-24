@@ -1,0 +1,70 @@
+name: Portable desktop artifacts
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add both macOS architectures
+        if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+        working-directory: apps/desktop
+      - run: npm test
+        working-directory: apps/desktop
+      - name: Build unsigned universal Mac app and disk image
+        if: runner.os == 'macOS'
+        run: npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
+        working-directory: apps/desktop
+      - name: Build portable Windows executable
+        if: runner.os == 'Windows'
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle
+        working-directory: apps/desktop
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+      - name: Build optional Windows MSI
+        id: msi
+        continue-on-error: true
+        if: runner.os == 'Windows'
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles msi
+        working-directory: apps/desktop
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+      - name: Archive app bundle preserving permissions and symlinks
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app' 'target/MobBoss-macOS-universal.app.zip'
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: MobBoss-macOS-universal-unsigned
+          path: |
+            target/MobBoss-macOS-universal.app.zip
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: MobBoss-Windows-portable
+          path: target/x86_64-pc-windows-msvc/release/MobBoss.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && steps.msi.outcome == 'success'
+        with:
+          name: MobBoss-Windows-optional-MSI
+          path: target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: error
