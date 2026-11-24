@@ -83,6 +83,50 @@ pub fn sanitize(name: &str) -> String {
 pub fn project_dir(root: &Path, project: &str) -> PathBuf {
     root.join(MEDIA_BY_PROJECT).join(sanitize(project))
 }
+/// Comparison only: keep original paths for checksums, publication and journals.
+/// Reserve names case-insensitively even on the Linux development host so plans
+/// remain portable to default Windows/macOS volumes.
+fn path_key(path: &Path) -> String {
+    path_key_for(&path.to_string_lossy(), cfg!(windows))
+}
+fn path_key_for(path: &str, windows: bool) -> String {
+    let path = if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    }
+    .to_lowercase();
+    // canonicalize() may supply verbatim drive or UNC paths. Don't canonicalize
+    // here: the planner is pure and its proposed destinations need not exist.
+    let path = if windows {
+        if let Some(unc) = path.strip_prefix("//?/unc/") {
+            format!("//{unc}")
+        } else {
+            path.strip_prefix("//?/").unwrap_or(&path).to_owned()
+        }
+    } else {
+        path
+    };
+    let prefix = if windows && path.starts_with("//") {
+        "//"
+    } else if path.starts_with('/') {
+        "/"
+    } else {
+        ""
+    };
+    let mut key = format!(
+        "{prefix}{}",
+        path.split('/')
+            .filter(|p| !p.is_empty() && *p != ".")
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    // C: is drive-relative; C:/ is the drive root. Never conflate them.
+    if windows && key.len() == 2 && key.ends_with(':') && path.ends_with('/') {
+        key.push('/');
+    }
+    key
+}
 pub fn build(
     op: Operation,
     project: &str,
@@ -112,7 +156,7 @@ pub fn build(
             "Avid will rebuild its media databases on next launch".into(),
         ],
     };
-    let key = |p: &Path| p.to_string_lossy().to_lowercase();
+    let key = path_key;
     let mut occupied: BTreeMap<String, (PathBuf, Existing)> = existing
         .iter()
         .map(|(p, e)| (key(p), (p.clone(), e.clone())))
@@ -194,7 +238,7 @@ pub fn build(
                     format!("{folder}.{n}")
                 });
                 let candidate = p.join(input.file.path.file_name().unwrap_or_default());
-                if candidate != source {
+                if key(&candidate) != key(&source) {
                     if let Some((actual, e)) = occupied.get(&key(&candidate)) {
                         if existing.contains_key(actual)
                             && e.size == input.file.size
@@ -212,7 +256,7 @@ pub fn build(
                 });
                 if counts.get(&key(&p)).copied().unwrap_or(0) < FOLDER_LIMIT
                     || same
-                    || candidate == source
+                    || key(&candidate) == key(&source)
                 {
                     break p;
                 }
@@ -220,7 +264,7 @@ pub fn build(
             };
             let filename = input.file.path.file_name().unwrap_or_default();
             let mut dest = dest_folder.join(filename);
-            if source == dest {
+            if key(&source) == key(&dest) {
                 plan.warnings
                     .push(format!("Already collected: {}", source.display()));
                 continue;
@@ -351,6 +395,111 @@ mod tests {
             &BTreeMap::from([(PathBuf::from("/shuttle"), u64::MAX)]),
         )
         .unwrap()
+    }
+    #[test]
+    fn comparison_keys_normalize_windows_separators_case_and_verbatim_prefixes() {
+        let expected = "c:/sample drive/media by project/project/avid mediafiles/mxf/1/a.mxf";
+        for path in [
+            r"C:\Sample Drive\Media By Project\Project\Avid MediaFiles/MXF/1/a.mxf",
+            r"c:/SAMPLE DRIVE/Media By Project/Project/Avid MediaFiles\MXF\1\A.MXF",
+            r"\\?\C:\Sample Drive\Media By Project\Project\Avid MediaFiles\MXF\1\A.mxf",
+            r"C:/Sample Drive//Media By Project/./Project/Avid MediaFiles/MXF/1/a.mxf",
+        ] {
+            assert_eq!(path_key_for(path, true), expected, "{path}");
+        }
+        let unc = "//server/sample share/media by project/project/a.mxf";
+        assert_eq!(
+            path_key_for(
+                r"\\Server\Sample Share\Media By Project/Project\A.MXF",
+                true
+            ),
+            unc
+        );
+        assert_eq!(
+            path_key_for(
+                r"\\?\UNC\SERVER\Sample Share/Media By Project\Project\a.mxf",
+                true
+            ),
+            unc
+        );
+        assert_ne!(path_key_for(r"C:\", true), path_key_for("C:", true));
+        assert_ne!(
+            path_key_for("C:/sample/a.mxf", true),
+            path_key_for("D:/sample/a.mxf", true)
+        );
+        assert_ne!(
+            path_key_for("//server/share/a.mxf", true),
+            path_key_for("/server/share/a.mxf", true)
+        );
+    }
+    #[test]
+    fn portable_case_keys_preserve_posix_backslashes() {
+        assert_eq!(
+            path_key_for("/Volumes/Sample Drive/Project/A.MXF", false),
+            path_key_for("/volumes/sample drive/project/a.mxf", false)
+        );
+        // Backslash is a legal filename character on macOS/Linux, not a separator.
+        assert_ne!(
+            path_key_for(r"/media/folder\a.mxf", false),
+            path_key_for("/media/folder/a.mxf", false)
+        );
+    }
+    #[test]
+    fn duplicate_lookup_and_checksum_requests_keep_the_observed_destination() {
+        let mut i = input(
+            if cfg!(windows) {
+                "C:/Sample Drive"
+            } else {
+                "/Sample Drive"
+            },
+            "a.mxf",
+        );
+        let build_plan = |i: &Input, existing: &BTreeMap<PathBuf, Existing>| {
+            build(
+                Operation::Copy,
+                "Project",
+                std::slice::from_ref(i),
+                Some(Path::new(if cfg!(windows) {
+                    "C:/Shuttle"
+                } else {
+                    "/shuttle"
+                })),
+                existing,
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        };
+        let planned = build_plan(&i, &BTreeMap::new()).actions[0].dest.clone();
+        let observed = if cfg!(windows) {
+            // Simulate a canonicalized WalkDir entry versus a mixed-separator join.
+            PathBuf::from(format!(
+                r"\\?\{}",
+                planned.to_string_lossy().replace('/', "\\").to_uppercase()
+            ))
+        } else {
+            PathBuf::from(planned.to_string_lossy().to_uppercase())
+        };
+        let mut existing = BTreeMap::from([(
+            observed.clone(),
+            Existing {
+                size: 5,
+                checksum: String::new(),
+            },
+        )]);
+        i.checksum.clear();
+        let pending = build_plan(&i, &existing);
+        assert!(!pending.checksum_requests.is_empty());
+        assert!(pending
+            .checksum_requests
+            .iter()
+            .all(|pair| pair == &(i.file.path.clone(), observed.clone())));
+        i.checksum = "abc".into();
+        existing.get_mut(&observed).unwrap().checksum = "abc".into();
+        let p = build_plan(&i, &existing);
+        assert!(p.actions[0].duplicate);
+        assert_eq!(p.actions[0].dest, observed);
+        assert!(p.conflicts.is_empty());
+        assert_eq!(p.drives[0].bytes, 0);
     }
     #[test]
     fn portable_names() {
