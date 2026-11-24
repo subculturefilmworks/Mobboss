@@ -45,6 +45,8 @@ enum Command {
     Plan(TransferArgs),
     Move(TransferArgs),
     Copy(TransferArgs),
+    /// Move media on each drive, then copy it to the required backup destination.
+    #[command(visible_alias = "move-and-backup")]
     Collect(TransferArgs),
     /// Preview undo; pass --yes to reverse verified transfers.
     Undo {
@@ -91,6 +93,9 @@ enum Command {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Command::Collect(a) = &args.command {
+        anyhow::ensure!(a.dest.is_some(), "Move & Backup (collect) requires --dest");
+    }
     let cancel = CancellationToken::default();
     let interrupt = cancel.clone();
     ctrlc::set_handler(move || interrupt.cancel())?;
@@ -133,7 +138,7 @@ fn main() -> Result<()> {
                     println!("{}", outcome_summary(&result));
                 }
             } else {
-                eprintln!("Dry run only. Use move/copy/collect --yes to execute.");
+                eprintln!("Dry run only. Use move/copy/move-and-backup --yes to execute.");
             }
         }
         Command::Undo { log, yes, json } => {
@@ -384,6 +389,15 @@ mod tests {
             Command::Plan(TransferArgs { json: true, .. })
         ));
         assert!(Args::try_parse_from(["mobboss", "undo", "log.csv", "--json"]).is_ok());
+    }
+    #[test]
+    fn move_and_backup_alias_keeps_collect_compatible() {
+        for name in ["collect", "move-and-backup"] {
+            let args =
+                Args::try_parse_from(["mobboss", name, "--project", "Film", "--dest", "/backup"])
+                    .unwrap();
+            assert!(matches!(args.command, Command::Collect(_)));
+        }
     }
     #[test]
     fn readable_summary_includes_space_and_refusal() {

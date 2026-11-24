@@ -2,14 +2,17 @@ use crate::service::{self, Settings};
 use mobboss_core::{CancellationToken, ScanMode, ScanOptions};
 use std::{path::PathBuf, sync::Mutex};
 use tauri::{Emitter, Manager, State};
-struct AppState {
-    settings: Mutex<Settings>,
-    active: Mutex<Option<CancellationToken>>,
+pub(crate) struct AppState {
+    pub(crate) settings: Mutex<Settings>,
+    pub(crate) active: Mutex<Option<CancellationToken>>,
+    pub(crate) preview_clearing: std::sync::atomic::AtomicBool,
+    pub(crate) proxy: Mutex<crate::preview::ProxyState>,
+    pub(crate) thumbnails: Mutex<Option<CancellationToken>>,
     planned: Mutex<Option<mobboss_core::plan::Plan>>,
     undo_log: Mutex<Option<PathBuf>>,
 }
-type Reply<T> = Result<T, String>;
-fn err(e: impl std::fmt::Display) -> String {
+pub(crate) type Reply<T> = Result<T, String>;
+pub(crate) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 #[tauri::command]
@@ -17,7 +20,11 @@ fn settings(state: State<AppState>) -> Reply<Settings> {
     Ok(state.settings.lock().map_err(err)?.clone())
 }
 #[tauri::command]
-fn save_settings(mut value: Settings, state: State<AppState>) -> Reply<Settings> {
+fn save_settings(
+    mut value: Settings,
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Reply<Settings> {
     let active = state.active.lock().map_err(err)?;
     if active.is_some() {
         return Err("Wait for the current scan before changing settings".into());
@@ -30,6 +37,18 @@ fn save_settings(mut value: Settings, state: State<AppState>) -> Reply<Settings>
         .collect();
     value.save().map_err(err)?;
     *state.settings.lock().map_err(err)? = value.clone();
+    let protected = state
+        .proxy
+        .lock()
+        .map_err(err)?
+        .playing
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
+    crate::preview::cache(&app)
+        .map_err(err)?
+        .prune(value.preview_cache_bytes, &protected)
+        .map_err(err)?;
     Ok(value)
 }
 #[tauri::command]
@@ -60,6 +79,8 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
     if active.is_some() {
         return Err("A scan is already running".into());
     }
+    crate::preview::cancel_thumbnails(state.clone())?;
+    crate::preview::cancel_proxy(None, state.clone())?;
     let settings = state.settings.lock().map_err(err)?.clone();
     let token = CancellationToken::default();
     *active = Some(token.clone());
@@ -80,6 +101,9 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
             *active = None;
         }
         let _ = app.emit("scan-finished", &result);
+        if result.is_ok() && !token.is_cancelled() {
+            let _ = crate::preview::start_thumbnails(app.clone(), app.state::<AppState>());
+        }
     });
     Ok(())
 }
@@ -163,6 +187,8 @@ fn start_operation(
     } else {
         None
     };
+    crate::preview::cancel_thumbnails(state.clone())?;
+    crate::preview::cancel_proxy(None, state.clone())?;
     let token = CancellationToken::default();
     *active = Some(token.clone());
     std::thread::spawn(move || {
@@ -234,15 +260,29 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let cache = crate::preview::cache(app.handle())?;
+            app.asset_protocol_scope()
+                .allow_directory(&cache.root, true)?;
             app.manage(AppState {
                 settings: Mutex::new(Settings::load()?),
                 active: Mutex::new(None),
+                preview_clearing: std::sync::atomic::AtomicBool::new(false),
+                proxy: Mutex::new(crate::preview::ProxyState::default()),
+                thumbnails: Mutex::new(None),
                 planned: Mutex::new(None),
                 undo_log: Mutex::new(None),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            crate::dialog::pick_path,
+            crate::preview::preview_status,
+            crate::preview::thumbnail_data,
+            crate::preview::prepare_proxy,
+            crate::preview::cancel_proxy,
+            crate::preview::clear_preview_cache,
+            crate::preview::start_thumbnails,
+            crate::preview::cancel_thumbnails,
             settings,
             save_settings,
             files,

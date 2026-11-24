@@ -1,6 +1,8 @@
+pub mod clips;
 pub mod mdb;
 pub mod mxf;
 pub mod pmr;
+pub mod previews;
 pub mod scan;
 pub use scan::*;
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,12 @@ pub struct MediaMetadata {
     pub edit_rate: Option<Rational>,
     pub sample_rate: Option<Rational>,
     pub duration: Option<i64>,
+    pub start_timecode: Option<i64>,
+    pub timecode_fps: Option<u16>,
+    pub timecode_drop: Option<bool>,
+    pub track_id: Option<u32>,
+    pub timecode_rate: Option<Rational>,
+    pub header_version: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub bit_depth: Option<u32>,

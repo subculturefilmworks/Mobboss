@@ -8,10 +8,12 @@ import React, {
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "./Dialog";
 import MediaTable, { useStored } from "./MediaTable";
 import {
   bytes,
+  groupedInteger,
+  filename,
   diffRows,
   filter,
   projects,
@@ -28,6 +30,11 @@ import {
 } from "./model";
 import "./style.css";
 import Operations from "./Operations";
+import { usePreviews } from "./Previews";
+import Player from "./Player";
+import type { Clip } from "./model";
+import ClipTable from "./ClipTable";
+import { groupClips } from "./model";
 const desktop = "__TAURI_INTERNALS__" in window;
 const emptyFilters: Filters = {
   search: "",
@@ -38,14 +45,18 @@ const emptyFilters: Filters = {
   diff: "",
 };
 function App() {
+  const [player, setPlayer] = useState<Clip | null>(null);
   const [files, setFiles] = useState<MediaFile[]>([]);
+  const previews = usePreviews(desktop, files);
   const [archived, setArchived] = useState<MediaFile[]>([]);
   const [settings, setSettings] = useState<Settings>({
     index: "",
     roots: [],
     concurrency: 8,
+    preview_cache_bytes: 5_000_000_000,
   });
   const [volumes, setVolumes] = useState<Volume[]>([]);
+  const [view, setView] = useStored("mobboss.view", "files");
   const [mode, setMode] = useStored("mobboss.mode", "quick");
   const [theme, setTheme] = useStored("mobboss.theme", "dark");
   const [filters, setFilters] = useState<Filters>(emptyFilters);
@@ -69,6 +80,7 @@ function App() {
       ? ""
       : "Browser preview · Open the desktop app to scan local media.",
   );
+  const [includeThumbnails, setIncludeThumbnails] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const pending = useRef(new Map<string, MediaFile>());
@@ -157,6 +169,12 @@ function App() {
       ),
     [rows, filters],
   );
+  const clips = useMemo(() => {
+    const matching = new Set(filtered.map((r) => r.file.path));
+    return groupClips(rows.map((r) => r.file)).filter((c) =>
+      c.files.some((f) => matching.has(f.path)),
+    );
+  }, [rows, filtered]);
   const summary = useMemo(() => projects(files), [files]);
   const selectedRows = useMemo(
     () => rows.filter((r) => selected.has(r.file.path)),
@@ -396,6 +414,14 @@ function App() {
               </small>
             </label>
           ))}
+          <label className="report-thumbnails">
+            <input
+              type="checkbox"
+              checked={includeThumbnails}
+              onChange={(e) => setIncludeThumbnails(e.target.checked)}
+            />
+            Include thumbnails in HTML
+          </label>
           <div className="summary-exports">
             <button
               onClick={() =>
@@ -406,16 +432,25 @@ function App() {
             </button>
             <button
               onClick={() =>
-                run(() => exportContent("projects.html", summaryHtml(files)))
+                run(async () => {
+                  const thumbnails =
+                    includeThumbnails && desktop
+                      ? await invoke<Record<string, string>>("thumbnail_data", {
+                          clipIds: groupClips(files).map((c) => c.id),
+                        })
+                      : undefined;
+                  await exportContent(
+                    "projects.html",
+                    summaryHtml(
+                      files,
+                      includeThumbnails ? thumbnails || {} : undefined,
+                    ),
+                  );
+                })
               }
             >
               HTML ↗
             </button>
-          </div>
-          <div className="sidebar-foot">
-            Verified media management
-            <br />
-            Your media stays where it belongs.
           </div>
         </aside>
         <main>
@@ -538,12 +573,65 @@ function App() {
               </small>
             </div>
           )}
-          <MediaTable
-            showDiff={!!filters.diff}
-            rows={filtered}
-            selected={selected}
-            setSelected={setSelected}
-          />
+          <div className="view-toggle" role="group" aria-label="Inventory view">
+            <button
+              aria-pressed={view === "files"}
+              onClick={() => setView("files")}
+            >
+              Files
+            </button>
+            <button
+              aria-pressed={view === "clips"}
+              onClick={() => setView("clips")}
+            >
+              Clips
+            </button>
+            <button
+              aria-pressed={view === "grid"}
+              onClick={() => setView("grid")}
+            >
+              Grid
+            </button>
+          </div>
+          <div className="preview-status" role="status">
+            <span>
+              {previews.running
+                ? `Thumbnails ${previews.progress?.done || 0} / ${previews.progress?.total || clips.length}`
+                : previews.status.message}
+              {Object.keys(previews.errors).length > 0
+                ? ` · ${Object.keys(previews.errors).length} failed (retry available)`
+                : ""}
+            </span>
+            {previews.running ? (
+              <button onClick={() => run(previews.cancel)}>
+                Cancel thumbnails
+              </button>
+            ) : (
+              previews.status.available && (
+                <button disabled={busy} onClick={() => run(previews.retry)}>
+                  Generate / retry thumbnails
+                </button>
+              )
+            )}
+          </div>
+          {view !== "files" ? (
+            <ClipTable
+              thumbnailErrors={previews.errors}
+              onPreview={setPlayer}
+              thumbnails={previews.status.thumbnails}
+              grid={view === "grid"}
+              clips={clips}
+              selected={selected}
+              setSelected={setSelected}
+            />
+          ) : (
+            <MediaTable
+              showDiff={!!filters.diff}
+              rows={filtered}
+              selected={selected}
+              setSelected={setSelected}
+            />
+          )}
           {reports.map((report, i) => {
             const r = report.reconciliation;
             return (
@@ -553,18 +641,21 @@ function App() {
                     {r.root}: {r.media_files.toLocaleString()} media files ·{" "}
                     {r.database_files.length} Avid database files (.pmr/.mdb) ·{" "}
                     {r.other_files} other files · {r.folders} folders — total{" "}
-                    {r.total_bytes.toLocaleString()} bytes
+                    {groupedInteger(r.total_bytes)} bytes
                   </summary>
                   {r.database_files.map((db) => (
-                    <p key={db.path}>
-                      {db.path} — {db.description} ·{" "}
-                      <span title={`${db.size} bytes`}>{bytes(db.size)}</span> ·
-                      modified{" "}
-                      {db.modified_ns
-                        ? new Date(
-                            Number(db.modified_ns) / 1e6,
-                          ).toLocaleString()
-                        : "unknown"}
+                    <p
+                      key={db.path}
+                      title={`${db.path} · ${db.description} · Modified ${db.modified_ns ? new Date(Number(db.modified_ns) / 1e6).toLocaleString() : "unknown"}`}
+                    >
+                      {filename(db.path)} ·{" "}
+                      {db.path.toLowerCase().endsWith(".mdb")
+                        ? "Avid media database"
+                        : "Avid media index"}{" "}
+                      ·{" "}
+                      <span title={`${db.size.toLocaleString()} bytes`}>
+                        {bytes(db.size)}
+                      </span>
                       {db.pmr_missing !== null && (
                         <>
                           {" "}
@@ -637,6 +728,14 @@ function App() {
           </footer>
         </main>
       </div>
+      {player && (
+        <Player
+          key={player.id}
+          clip={player}
+          poster={previews.status.thumbnails[player.id]}
+          onClose={() => setPlayer(null)}
+        />
+      )}
       {settingsOpen && (
         <div className="modal-backdrop">
           <section
@@ -680,6 +779,41 @@ function App() {
               8 is the default. Mounted shares must be connected in Finder or
               Explorer to appear in Sources.
             </p>
+            <label>
+              Preview cache limit (GB)
+              <input
+                type="number"
+                min="0.1"
+                max="1000"
+                step="0.1"
+                value={settings.preview_cache_bytes / 1_000_000_000}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    preview_cache_bytes: Math.round(
+                      Number(e.target.value) * 1_000_000_000,
+                    ),
+                  })
+                }
+              />
+            </label>
+            <p className="hint">
+              Least recently used previews are removed first. Current usage:{" "}
+              {bytes(previews.status.cache_bytes || 0)}.
+            </p>
+            <button
+              disabled={!desktop || busy}
+              onClick={() =>
+                run(async () => {
+                  setPlayer(null);
+                  await invoke("clear_preview_cache");
+                  await previews.refresh();
+                  setNotice("Preview cache cleared");
+                })
+              }
+            >
+              Clear preview cache
+            </button>
             <div className="modal-actions">
               <button
                 onClick={() => {

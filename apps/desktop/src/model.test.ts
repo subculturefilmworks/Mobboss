@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   bytes,
+  groupedInteger,
   requiresDestination,
   duration,
   filter,
@@ -157,5 +158,74 @@ describe("operation destination requirements", () => {
     expect(requiresDestination([file("D:\\editorial\\a.mxf", "Film")])).toBe(
       true,
     );
+  });
+});
+
+it("groups only UIDs and selects the complete clip even when members were filtered out", async () => {
+  const { groupClips, selectClip, timecode } = await import("./model");
+  const v = file("/media/v", "Film"),
+    a = file("/media/a", "Film"),
+    unknown = file("/media/u", "Film");
+  v.metadata.material_package_uid = a.metadata.material_package_uid = "same";
+  a.metadata.track_kind = "audio";
+  const clips = groupClips([v, a, unknown]);
+  expect(clips).toHaveLength(2);
+  const clip = clips.find((c) => c.files.length === 2)!;
+  expect(clip.tracks).toBe("V1 + A1");
+  expect([...selectClip(new Set(), clip)]).toEqual([a.path, v.path]);
+  expect(selectClip(new Set([a.path]), clip).size).toBe(2);
+  expect(selectClip(new Set([a.path, v.path]), clip).size).toBe(0);
+  expect(timecode({ start_timecode: 86400, timecode_fps: 24 })).toBe(
+    "01:00:00:00",
+  );
+  expect(
+    timecode({ start_timecode: 1800, timecode_fps: 30, timecode_drop: true }),
+  ).toBe("00:01:00;02");
+  expect(timecode({})).toBe("—");
+});
+
+it("HTML thumbnails are opt-in, one per clip, constrained to JPEG data, and printable", async () => {
+  const { groupClips } = await import("./model");
+  const a = file("/media/a", "<Film>"),
+    b = file("/media/b", "<Film>");
+  a.metadata.material_package_uid = b.metadata.material_package_uid = "one";
+  const id = groupClips([a, b])[0].id;
+  expect(summaryHtml([a, b])).not.toContain("<img");
+  const html = summaryHtml([a, b], { [id]: "data:image/jpeg;base64,/9j/AA==" });
+  expect(html.match(/<img/g)).toHaveLength(1);
+  expect(html).toContain("Print / Save as PDF");
+  expect(html).toContain("@media print");
+  expect(html).toContain("&lt;Film&gt;");
+  expect(summaryHtml([a], { [id]: "file:///private/image.jpg" })).not.toContain(
+    "<img",
+  );
+});
+
+describe("reconciliation number grouping", () => {
+  it("preserves the requested locale's grouping", () => {
+    expect(groupedInteger(23200945232, "en-US")).toBe("23,200,945,232");
+    expect(groupedInteger(23200945232, "de-DE")).toBe("23.200.945.232");
+    expect(groupedInteger(23200945232, "en-IN")).toBe("23,20,09,45,232");
+  });
+  it("falls back when the runtime has no grouping, including a C-locale webview", () => {
+    const parts = vi
+      .spyOn(Intl.NumberFormat.prototype, "formatToParts")
+      .mockReturnValue([{ type: "integer", value: "10000" }]);
+    try {
+      expect(groupedInteger(23200945232)).toBe("23,200,945,232");
+      const legacy = vi
+        .spyOn(Number.prototype, "toLocaleString")
+        .mockImplementation(function (this: number) {
+          return String(this.valueOf());
+        });
+      try {
+        expect(groupedInteger(23200945232)).toBe("23,200,945,232");
+        expect(groupedInteger(0)).toBe("0");
+      } finally {
+        legacy.mockRestore();
+      }
+    } finally {
+      parts.mockRestore();
+    }
   });
 });

@@ -139,6 +139,10 @@ fn prepare_with(
     destination: Option<&Path>,
     mut hash_file: impl FnMut(&Path) -> Result<String>,
 ) -> Result<Plan> {
+    ensure!(
+        op != Operation::Collect || destination.is_some(),
+        "Move & Backup needs an explicit destination root (--dest)"
+    );
     let all = index.files(None)?;
     let wanted: BTreeSet<_> = paths.iter().collect();
     ensure!(

@@ -193,7 +193,21 @@ impl Index {
         }
         let conn = Connection::open(&path)?;
         conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS folders(path TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS projects(name TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY,folder TEXT NOT NULL,size INTEGER NOT NULL,modified_ns TEXT NOT NULL,project TEXT,metadata TEXT NOT NULL,present INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS scan_runs(id INTEGER PRIMARY KEY,root TEXT,mode TEXT,started INTEGER,report TEXT);")?;
+        // Version 1: persistent grouping, backfilled without touching media. Triggers also
+        // cover transfers, missing rows and old clients that only update files.
+        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? < 1 {
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS clip_members(path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,clip_id TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS clip_members_id ON clip_members(clip_id);
+            INSERT OR REPLACE INTO clip_members SELECT path, CASE WHEN length(json_extract(metadata,'$.material_package_uid'))>0 THEN 'uid:'||json_extract(metadata,'$.material_package_uid') ELSE 'file:'||path END FROM files;
+            CREATE TRIGGER IF NOT EXISTS clip_insert AFTER INSERT ON files BEGIN INSERT OR REPLACE INTO clip_members VALUES(NEW.path,CASE WHEN length(json_extract(NEW.metadata,'$.material_package_uid'))>0 THEN 'uid:'||json_extract(NEW.metadata,'$.material_package_uid') ELSE 'file:'||NEW.path END); END;
+            CREATE TRIGGER IF NOT EXISTS clip_update AFTER UPDATE OF metadata ON files BEGIN UPDATE clip_members SET clip_id=CASE WHEN length(json_extract(NEW.metadata,'$.material_package_uid'))>0 THEN 'uid:'||json_extract(NEW.metadata,'$.material_package_uid') ELSE 'file:'||NEW.path END WHERE path=NEW.path; END;
+            CREATE TRIGGER IF NOT EXISTS clip_delete AFTER DELETE ON files BEGIN DELETE FROM clip_members WHERE path=OLD.path; END;
+            PRAGMA user_version=1;")?;
+        }
         Ok(Self { conn, path })
+    }
+    pub fn clips(&self) -> Result<Vec<crate::clips::Clip>> {
+        Ok(crate::clips::group(self.files(None)?))
     }
     pub fn files(&self, project: Option<&str>) -> Result<Vec<MediaFile>> {
         self.read_files(project, false)
@@ -515,7 +529,10 @@ impl Index {
             let deep =
                 mode == ScanMode::Deep || (mode == ScanMode::Auto && !db_folders.contains(&folder));
             let unknown = previous.is_none_or(|p| {
-                p.metadata.project.is_none() || p.metadata.file_package_uid.is_none()
+                p.metadata.project.is_none()
+                    || p.metadata.file_package_uid.is_none()
+                    || p.metadata.material_package_uid.is_none()
+                    || p.metadata.header_version != Some(1)
             });
             let db_changed = database.get(&path).zip(previous).is_some_and(|(e, p)| {
                 p.metadata.file_package_uid.as_deref() != Some(e.file_package_uid.as_str())

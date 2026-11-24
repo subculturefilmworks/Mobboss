@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open } from "./Dialog";
 import { bytes, requiresDestination, type MediaFile } from "./model";
 type Op = "move" | "copy" | "collect";
+const opLabel = (op: string) =>
+  op === "collect" ? "Move & Backup" : op[0].toUpperCase() + op.slice(1);
 interface Action {
   op: Op;
   source: string;
@@ -152,7 +154,7 @@ export default function Operations({
   async function undoLog(path?: string) {
     if (!path) {
       const chosen = await open({
-        title: "Choose a collect log",
+        title: "Choose an operation log",
         filters: [{ name: "Operation log", extensions: ["csv"] }],
       });
       if (typeof chosen !== "string") return;
@@ -186,6 +188,14 @@ export default function Operations({
     ? files.filter((f) => selected.has(f.path))
     : files.filter((f) => (f.metadata.project || "Unknown") === project);
   const needsDestination = requiresDestination(operationFiles);
+  const missingDestination =
+    (op !== "move" || needsDestination) && !destination.trim();
+  const consequence =
+    op === "copy"
+      ? "Originals stay where they are"
+      : op === "collect"
+        ? `Originals will be moved; a backup copy goes to ${destination || "the chosen destination"}`
+        : "Originals will be moved";
   const blocked = (plan?.drives || undo?.drives || []).some(
     (d) => d.available < d.required,
   );
@@ -203,7 +213,7 @@ export default function Operations({
                 disabled={!selected.size && !project}
                 onClick={() => begin(o)}
               >
-                {o[0].toUpperCase() + o.slice(1)}{" "}
+                {opLabel(o)}{" "}
                 {selected.size ? `${selected.size} selected files` : "project"}…
               </button>
             ))}
@@ -229,8 +239,11 @@ export default function Operations({
                   ? "Working safely…"
                   : undo
                     ? "Undo transfers"
-                    : `${op[0].toUpperCase() + op.slice(1)} media`}
+                    : `${opLabel(op)} media`}
             </h2>
+            {!undo && ["setup", "preview", "confirm"].includes(stage) && (
+              <p className="operation-consequence">{consequence}</p>
+            )}
             {error && (
               <p role="alert" className="operation-error">
                 {error}
@@ -252,18 +265,18 @@ export default function Operations({
                 </label>
                 <p className="hint">
                   {op === "collect"
-                    ? "Step 1: Move media into Media By Project on each source drive. Step 2 (optional): Copy the collected files to a destination."
+                    ? "Step 1: Move media into Media By Project on each source drive. Step 2: Copy the collected files to the required backup destination."
                     : op === "move"
                       ? "Move into Media By Project on each source drive."
                       : "Copy and verify media at a destination. Originals stay in place."}
                 </p>
                 {
                   <label>
-                    {op === "copy" || needsDestination
-                      ? "Destination root (required)"
-                      : op === "move"
-                        ? "Optional destination root (defaults to each source drive)"
-                        : "Optional copy destination root"}
+                    {op === "collect"
+                      ? "Backup destination root (required)"
+                      : op === "copy" || needsDestination
+                        ? "Destination root (required)"
+                        : "Optional destination root (defaults to each source drive)"}
                     <div className="destination-picker">
                       <input
                         value={destination}
@@ -289,18 +302,14 @@ export default function Operations({
                 {needsDestination && (
                   <p className="hint">
                     Some selected media is outside an Avid MediaFiles tree.
-                    Choose a destination root explicitly; Collect will move that
-                    media directly into the selected root’s project collection.
+                    Choose a destination root explicitly for this media.
                   </p>
                 )}
                 <div className="modal-actions">
                   <button onClick={() => setStage("")}>Cancel</button>
                   <button
                     className="primary"
-                    disabled={
-                      !name.trim() ||
-                      ((op === "copy" || needsDestination) && !destination)
-                    }
+                    disabled={!name.trim() || missingDestination}
                     onClick={() => act(preview)}
                   >
                     Build dry-run plan
@@ -377,7 +386,7 @@ export default function Operations({
                           <div key={i}>
                             <b>
                               Step {a.step + 1} ·{" "}
-                              {a.duplicate ? "Skip duplicate" : a.op}
+                              {a.duplicate ? "Skip duplicate" : opLabel(a.op)}
                             </b>
                             <p>{a.source}</p>
                             <p>→ {a.dest}</p>
@@ -419,7 +428,7 @@ export default function Operations({
                     <div className="action-list">
                       {undo.rows.map((r, i) => (
                         <div key={i}>
-                          <b>Undo {r.op}</b>
+                          <b>Undo {opLabel(r.op)}</b>
                           <p>{r.dest}</p>
                           <p>→ {r.source}</p>
                         </div>
@@ -433,6 +442,7 @@ export default function Operations({
                     className="primary"
                     disabled={
                       blocked ||
+                      (!undo && missingDestination) ||
                       plan?.actions.length === 0 ||
                       undo?.rows.length === 0
                     }
@@ -479,10 +489,10 @@ export default function Operations({
                   </button>
                   <button
                     className="primary"
-                    disabled={!sure}
+                    disabled={!sure || (!undo && missingDestination)}
                     onClick={() => act(execute)}
                   >
-                    Confirm and {undo ? "undo" : op}
+                    Confirm and {undo ? "undo" : opLabel(op)}
                   </button>
                 </div>
               </>

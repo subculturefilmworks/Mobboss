@@ -13,6 +13,11 @@ export interface Metadata {
   edit_rate?: Rational | null;
   sample_rate?: Rational | null;
   duration?: number | null;
+  start_timecode?: number | null;
+  timecode_fps?: number | null;
+  timecode_drop?: boolean | null;
+  track_id?: number | null;
+  timecode_rate?: Rational | null;
   width?: number | null;
   height?: number | null;
   bit_depth?: number | null;
@@ -66,6 +71,7 @@ export interface Settings {
   index: string;
   roots: string[];
   concurrency: number;
+  preview_cache_bytes: number;
 }
 export interface Volume {
   name: string;
@@ -74,6 +80,28 @@ export interface Volume {
   total: number;
 }
 export const filename = (path: string) => path.split(/[\\/]/).pop() || path;
+export function groupedInteger(
+  value: number,
+  locales?: string | string[],
+): string {
+  try {
+    const formatter = new Intl.NumberFormat(locales, {
+      maximumFractionDigits: 0,
+    });
+    if (formatter.formatToParts(10000).some((part) => part.type === "group"))
+      return formatter.format(value);
+  } catch {
+    // Some headless C-locale webviews lack working Intl grouping.
+  }
+  const fallback = value.toLocaleString("en-US", {
+    maximumFractionDigits: 0,
+    useGrouping: true,
+  });
+  if (Math.abs(value) < 1000 || fallback.includes(",")) return fallback;
+  return Math.round(value)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
 export function bytes(
   size: number,
   platform = globalThis.navigator?.platform || "",
@@ -250,15 +278,33 @@ const escapeHtml = (s: string) =>
         c
       ]!,
   );
-export function summaryHtml(files: MediaFile[]) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Mob Boss project summary</title><style>body{font:16px system-ui;margin:3rem}table{border-collapse:collapse}td,th{padding:12px;border-bottom:1px solid #ccc;text-align:left}</style><h1>Mob Boss · Projects</h1><table><thead><tr><th>Project</th><th>Files</th><th>Size</th></tr></thead><tbody>${projects(
+export function summaryHtml(
+  files: MediaFile[],
+  thumbnails?: Record<string, string>,
+) {
+  const clipTable = thumbnails
+    ? `<h2>Clips</h2><table><thead><tr><th>Poster</th><th>Clip</th><th>Project</th><th>Tracks</th><th>Duration</th><th>Start TC</th></tr></thead><tbody>${groupClips(
+        files,
+      )
+        .map((c) => {
+          const src = thumbnails[c.id];
+          const poster =
+            src && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(src)
+              ? `<img width="160" alt="Clip poster" src="${src}">`
+              : "Unavailable";
+          return `<tr><td>${poster}</td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.metadata.project || "Unknown")}</td><td>${escapeHtml(c.tracks)}</td><td>${duration(c.metadata)}</td><td>${timecode(c.metadata)}</td></tr>`;
+        })
+        .join("")}</tbody></table>`
+    : "";
+
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>Mob Boss project summary</title><style>body{font:16px system-ui;margin:3rem}table{border-collapse:collapse}td,th{padding:12px;border-bottom:1px solid #ccc;text-align:left}img{display:block;max-width:160px}tr{break-inside:avoid}@media print{body{margin:0;font-size:11px}button{display:none}thead{display:table-header-group}td,th{padding:6px}}</style><button onclick="window.print()">Print / Save as PDF</button><h1>Mob Boss · Projects</h1><table><thead><tr><th>Project</th><th>Files</th><th>Size</th></tr></thead><tbody>${projects(
     files,
   )
     .map(
       (p) =>
         `<tr><td>${escapeHtml(p.name)}</td><td>${p.count}</td><td>${bytes(p.size)} (${p.size} bytes)</td></tr>`,
     )
-    .join("")}</tbody></table></html>`;
+    .join("")}</tbody></table>${clipTable}</html>`;
 }
 export function diffRows(
   files: MediaFile[],
@@ -300,4 +346,91 @@ export function requiresDestination(files: MediaFile[]): boolean {
         .split(/[\\/]/)
         .some((part) => part.toLowerCase() === "avid mediafiles"),
   );
+}
+
+export interface Clip {
+  id: string;
+  name: string;
+  files: MediaFile[];
+  metadata: Metadata;
+  size: number;
+  tracks: string;
+}
+export function groupClips(files: MediaFile[]): Clip[] {
+  const groups = new Map<string, MediaFile[]>();
+  for (const file of files) {
+    const id = file.metadata.material_package_uid
+      ? `uid:${file.metadata.material_package_uid}`
+      : `file:${file.path}`;
+    groups.set(id, [...(groups.get(id) || []), file]);
+  }
+  return [...groups].map(([id, members]) => {
+    members.sort(
+      (a, b) =>
+        (a.metadata.track_id ?? 0) - (b.metadata.track_id ?? 0) ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    );
+    const first =
+      members.find((f) => f.metadata.track_kind === "video") || members[0];
+    const tracks = (
+      [
+        ["video", "V"],
+        ["audio", "A"],
+        ["data", "D"],
+      ] as const
+    )
+      .flatMap(([kind, prefix]) => {
+        const n = new Set(
+          members
+            .filter((f) => f.metadata.track_kind === kind)
+            .map((f) => f.metadata.file_package_uid || f.path),
+        ).size;
+        return n ? [n === 1 ? `${prefix}1` : `${prefix}1–${prefix}${n}`] : [];
+      })
+      .join(" + ");
+    return {
+      id,
+      name: first.metadata.clip_name || filename(first.path),
+      files: members,
+      metadata: first.metadata,
+      size: totalSize(members),
+      tracks,
+    };
+  });
+}
+export function selectClip(
+  selected: Set<string>,
+  clip: Clip,
+  additive = true,
+): Set<string> {
+  const next = additive ? new Set(selected) : new Set<string>();
+  const remove = additive && clip.files.every((f) => selected.has(f.path));
+  clip.files.forEach((f) => (remove ? next.delete(f.path) : next.add(f.path)));
+  return next;
+}
+export function timecode(m: Metadata, seconds = 0): string {
+  if (m.start_timecode == null || !m.timecode_fps) return "—";
+  const fps = m.timecode_fps;
+  const r = m.timecode_rate || (m.track_kind !== "audio" ? m.edit_rate : null);
+  const rate = r && r.denominator > 0 ? r.numerator / r.denominator : fps;
+  let frames = Math.max(
+    0,
+    m.start_timecode + Math.floor(seconds * rate + 0.0001),
+  );
+  if (m.timecode_drop && (fps === 30 || fps === 60)) {
+    const drop = fps === 60 ? 4 : 2,
+      ten = fps * 600 - drop * 9;
+    const d = Math.floor(frames / ten),
+      rem = frames % ten;
+    frames +=
+      drop * 9 * d +
+      (rem >= drop ? drop * Math.floor((rem - drop) / (fps * 60 - drop)) : 0);
+  }
+  const parts = [
+    Math.floor(frames / (fps * 3600)) % 24,
+    Math.floor(frames / (fps * 60)) % 60,
+    Math.floor(frames / fps) % 60,
+    frames % fps,
+  ].map((n) => String(n).padStart(2, "0"));
+  return `${parts.slice(0, 3).join(":")}${m.timecode_drop ? ";" : ":"}${parts[3]}`;
 }
