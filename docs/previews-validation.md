@@ -194,3 +194,39 @@ Updated sanitized evidence: [Clips](screenshots/clips.png),
 [backup confirmation](screenshots/move-and-backup-confirm.png),
 [title tile](screenshots/title-placeholder.png), [title player](screenshots/title-player.png).
 All screenshots come from temporary generic Sample Drive / Sample Project copies.
+
+
+## Windows encoder fallback follow-up
+
+The rc5 native gate passed on macOS but found no usable H.264 Media Foundation
+transform on the Windows Server runner. Windows now tries `h264_mf`, then retries
+an encoder-opening failure once with LGPL **libvpx VP8 / libopus in WebM**.
+Input, output/disk, cancellation and unrelated encoder errors are not retried.
+The successful choice is persisted in app-data `previews/windows-encoder.txt`,
+containing only a binary fingerprint and container. It survives preview clearing
+and is invalidated when the ffmpeg path, size or modification time changes.
+The WebM profile has its own cache key and extension. The player displays the
+encoder and container, including when reusing a cached proxy.
+
+The pinned Windows archive checksum and extracted executable match; its embedded
+configuration explicitly enables **libvpx and libopus**. Native preparation also
+requires their encoders, VP8/Opus decoders and WebM/null muxers. No archive, source
+pin or Mac configure flags were changed.
+
+The Windows release gate always generates WebM for mono duplication and two-track
+stereo, checks the VP8/Opus headers and two channels, and decodes the entire output.
+It then probes H.264 through the production selection/fallback path; logs state
+which encoder ran or that H.264 initialization was unavailable. Only recognized
+initialization failures permit the fallback. macOS still requires VideoToolbox
+H.264/AAC faststart MP4 and the existing JPEG assertion is retained everywhere.
+
+Validation on Linux: **78 Rust tests**, all-target/all-feature clippy with warnings
+as errors, **12 Vitest tests**, frontend build and full native Tauri debug build
+pass. The synthetic Windows WebM profile passes with the checked LGPL Linux
+ffmpeg, including full proxy decode; the copied-sample integration test passes
+with the production selection path too. Unit tests cover persisted selection/reopen,
+cache clearing, binary-change invalidation, one retry, failed fallback, unrelated
+errors, cancellation and no Mac retry. Native xvfb also received the new response,
+loaded a 5.304-second preview and displayed “Preview: libvpx (VP8) · WebM”.
+The Windows executable and WebView2 have not been run on this Linux machine;
+the updated native Windows gate remains pending the next owner-triggered build.

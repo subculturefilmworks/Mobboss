@@ -16,9 +16,12 @@ ffmpeg -f lavfi -i sine=frequency=880:sample_rate=48000 -t 1 -c:a pcm_s16le -f m
 
 `cargo test -p mobboss-core --test bundled_previews` uses `MOBBOSS_FFMPEG` and the
 production thumbnail/proxy builders. It skips without ffmpeg unless
-`MOBBOSS_REQUIRE_CODEC_SMOKE=1` is set (the release workflow sets it). On Mac and
-Windows it requires a JPEG plus H.264/AAC faststart MP4 with two-channel audio
-from both mono duplication and two-track merging;
-Linux exercises its normal WebM proxy. It does not substitute software encoders
-when native hardware encoding fails. The test joins the independent material
+`MOBBOSS_REQUIRE_CODEC_SMOKE=1` is set (the release workflow sets it).
+On Mac it requires a JPEG plus H.264/AAC faststart MP4 with two-channel audio
+from both mono duplication and two-track merging. Windows always tests VP8/Opus
+WebM (including full decode and the two-channel Opus header), then tries native
+H.264 through the production fallback path. An unavailable H.264 encoder logs a
+skip to the tested WebM proxy; other errors fail. Linux exercises the Windows
+WebM profile with its development ffmpeg. The Mac gate never substitutes encoders.
+The test joins the independent material
 UIDs in memory to form one clip, without editing these committed inputs.

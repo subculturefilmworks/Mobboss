@@ -202,7 +202,7 @@ pub async fn prepare_proxy(
     tracks: Vec<usize>,
     request_id: String,
     app: tauri::AppHandle,
-) -> Reply<PathBuf> {
+) -> Reply<previews::ProxyOutput> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let token = CancellationToken::default();
@@ -243,7 +243,7 @@ pub async fn prepare_proxy(
             .unwrap_or(1.0)
             .max(0.001);
         let result = cache
-            .proxy(
+            .proxy_with_fallback(
                 &ffmpeg,
                 &clip,
                 &tracks,
@@ -259,12 +259,12 @@ pub async fn prepare_proxy(
                     );
                 },
             )
-            .and_then(|path| {
-                if std::fs::metadata(&path)?.len() > settings.preview_cache_bytes {
-                    let _ = std::fs::remove_file(&path);
+            .and_then(|output| {
+                if std::fs::metadata(&output.path)?.len() > settings.preview_cache_bytes {
+                    let _ = std::fs::remove_file(&output.path);
                     anyhow::bail!("Preview exceeds cache limit; increase it in Settings");
                 }
-                Ok(path)
+                Ok(output)
             })
             .map_err(err);
         let protected = {
@@ -275,8 +275,8 @@ pub async fn prepare_proxy(
                 .is_some_and(|(id, _)| id == &request_id)
             {
                 proxy.active = None;
-                if let Ok(path) = &result {
-                    proxy.playing = Some(path.clone());
+                if let Ok(output) = &result {
+                    proxy.playing = Some(output.path.clone());
                     proxy.playing_request = Some(request_id.clone());
                 }
             }

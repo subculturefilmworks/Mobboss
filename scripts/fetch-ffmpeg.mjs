@@ -95,19 +95,31 @@ function validate(binary, platform) {
     throw new Error("Refusing a non-LGPL ffmpeg");
   const decoders = output(["-decoders"]),
     encoders = output(["-encoders"]);
-  for (const name of ["dnxhd", "pcm_s16le", "pcm_s24le"])
+  for (const name of [
+    "dnxhd",
+    "pcm_s16le",
+    "pcm_s24le",
+    ...(platform === "windows" ? ["vp8", "opus"] : []),
+  ])
     if (!new RegExp(`\\b${name}\\b`).test(decoders))
       throw new Error(`ffmpeg missing decoder ${name}`);
   for (const name of [
     "mjpeg",
     "aac",
-    platform === "windows" ? "h264_mf" : "h264_videotoolbox",
+    ...(platform === "windows"
+      ? ["h264_mf", "libvpx", "libopus"]
+      : ["h264_videotoolbox"]),
   ])
     if (!new RegExp(`\\b${name}\\b`).test(encoders))
       throw new Error(`ffmpeg missing encoder ${name}`);
   for (const [flag, names] of [
     ["-demuxers", ["mxf"]],
-    ["-muxers", ["mp4", "image2"]],
+    [
+      "-muxers",
+      platform === "windows"
+        ? ["mp4", "image2", "webm", "null"]
+        : ["mp4", "image2"],
+    ],
     [
       "-filters",
       [
