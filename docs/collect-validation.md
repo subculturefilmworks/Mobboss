@@ -4,10 +4,10 @@ Branch: `feat/collect`, based on Phase 2 merge `32adfc0`. No push, merge, deploy
 
 ## Automated checks
 
-- `cargo test --offline`: **46 passed** — 23 core unit tests (including 11 planner tests and three executor fault/publication tests), 14 operation integration tests, eight scanner integration tests, one desktop service test. The optional cross-filesystem case returns early without its environment variable; it was also run separately on real distinct filesystems below.
+- `cargo test --offline`: **57 passed** — 32 core unit tests (including 11 planner tests and transfer/planning/fallback safety tests), 14 operation integration tests, eight scanner integration tests, one desktop service test, and two CLI tests. The optional cross-filesystem case returns early without its environment variable; it was also run separately on real distinct filesystems below.
 - `cargo clippy --offline --all-targets -- -D warnings`: clean.
 - `cargo clippy --offline -p mobboss-desktop --features desktop --all-targets -- -D warnings`: clean.
-- `npm test` in `apps/desktop`: **6 Vitest tests passed**.
+- `npm test` in `apps/desktop`: **7 Vitest tests passed**.
 - `npm run tauri -- build --debug --no-bundle`: full native Linux build passed (including TypeScript/Vite). Output: `target/debug/MobBoss`.
 - `MOBBOSS_CROSS_FS=/dev/shm cargo test --offline -p mobboss-core --test operations cross_filesystem -- --nocapture`: passed with different filesystem device IDs. Moves copied and verified first, logged `intent → published → done`, then removed sources. Undo restored the original checksum tree across the filesystem boundary.
 
@@ -49,6 +49,35 @@ The agreed destination layout is used for every operation; no `<Project> - <fold
 
 Move accepts an optional explicit destination, enabling cross-drive moves; default Move and Collect use source roots. `plan` is a Copy preview; `move`, `copy`, and `collect` each preview their own operation without `--yes`. CLI Undo also requires `--yes`, preserving dry-run-first safety. Cancellation uses Ctrl-C in CLI and the Cancel button in GUI.
 
-Linux native behavior is verified. macOS/Windows builds and native atomic-rename/File Manager behavior still require those platforms. The implementation uses Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, and Windows `MoveFileW` for no-overwrite atomic publication. There is no automatic crash recovery if a process is killed between filesystem publication and SQLite/log completion; retain the journals, rescan and inspect before retrying. Avid must be closed, and editors must expose the collected tree at an appropriate volume/workspace root for Avid to discover it. No media database files are edited.
+Linux native behavior is verified. macOS/Windows builds and native atomic-rename/File Manager behavior still require those platforms. The first publication attempt uses Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, and Windows `MoveFileW`. Unsupported same-device calls try hard-link/unlink, then a logged weaker check-exists-then-rename guard; only EXDEV or a real device difference triggers copying. There is no automatic crash recovery if a process is killed between filesystem publication and SQLite/log completion; retain the journals, rescan and inspect before retrying. Avid must be closed, and editors must expose the collected tree at an appropriate volume/workspace root for Avid to discover it. No media database files are edited.
 
 Review follow-up: `MOBBOSS_CROSS_FS=/dev/shm cargo test --offline -p mobboss-core cross_filesystem -- --nocapture` also exercises an actual cross-device move with corruption injected into the staged destination before verification. The source still exists at that point, the same-size corruption fails the checksum, no final destination is published, the partial is cleaned up, and the journal never advances beyond intent. The insufficient-space integration test separately asserts refusal before destination creation and retention of every source.
+
+## Review fix round: planning cost, NAS fallback, explicit roots and CLI
+
+Removed the developer-specific protected path from production code. `MOBBOSS_PROTECTED_PATHS` now accepts a platform-separated list of absolute protected roots. Test helpers check configurable roots; demo processes set the sample protection in their environment. A source file with no Avid MediaFiles ancestor requires an explicit destination in the core/CLI, and the GUI labels the root required and disables preview until selected. Explicit Collect for such media moves it directly into the chosen root's project collection instead of inferring a system mount root.
+
+A new-destination plan reads only metadata. The pure planner requests checksums only for same-size collisions with existing destination files, and preparation hashes/cache-resolves those pairs. No-destination-collision tests fail if planning attempts any checksum read; a collision test verifies that unrelated destination files are never hashed. Existing-destination duplicate-heavy plans necessarily still read the candidate pairs.
+
+Same-device moves now recheck size/mtime without reading media. Copy/cross-device Move computes BLAKE3 while streaming the source once, reads the staged destination once to verify, and rechecks source metadata before deleting. Rename journals have an empty checksum, while copied files retain the streaming checksum. Undo uses index size/mtime for moves and requires checksum verification before deleting copies. The new `guard` CSV column records the publication method; a compatibility test confirms older six-column logs still deserialize.
+
+Unsupported EINVAL/ENOTSUP/ENOSYS rename cases are simulated in tests. Same-device fallback tries a no-overwrite hard link, then a check-exists-then-rename if links are unsupported. The latter is a weaker overwrite guard on concurrently modified shares; it is durably logged **before** use and warned in results. EXDEV/device-difference tests require copy fallback; existing-destination, permission and I/O errors are also covered so they do not silently trigger a full media copy. A real weaker-fallback test checks that its journal entry precedes the rename. No live writable SMB/NAS or native Mac/Windows verification was attempted.
+
+Recovery after a publication error now treats destination checksum/index reconciliation as best-effort, preserving the per-file error instead of aborting the run on an unreadable destination. CLI plan/transfer/undo output is readable by default; `--json` preserves full machine-readable objects. CLI tests cover the JSON opt-in and space/refusal summary, and a frontend test covers required roots for Unix/Windows/mixed selections.
+
+### Rough plan timing
+
+Copied all **344 original MXFs**, **23,188,799,576 bytes (21.6 GiB)**, into `/tmp/mobboss-review-benchmark/drive/Avid MediaFiles/MXF/EDIT-PC.1` and scanned into a separate temporary index. Both versions were the debug CLI, same index and files, Copy preview to a new destination, JSON output captured by a subprocess. Copying the sample was read-only at the source; only `/tmp` was written.
+
+| Planner | Wall time |
+| --- | ---: |
+| Before, hashing every source | 15.6368 s |
+| After, metadata plus collision-only hashing, run 1 | 0.0379 s |
+| After, run 2 | 0.0370 s |
+| After, run 3 | 0.0368 s |
+
+These are rough **warm-cache** measurements; filesystem caches were not reset. They demonstrate removal of full media reads for an empty destination, not a NAS throughput or cold-cache benchmark. The timing JSON and original output are retained in `/tmp/mobboss-review-benchmark` for inspection.
+
+### Revalidation after review fixes
+
+The full 57-test Rust suite, workspace/full-desktop clippy, seven Vitest tests and complete native Linux debug Tauri build pass. Re-ran both real `/tmp` ↔ `/dev/shm` tests: successful copy/verify/delete plus checksum failure preserving the original. Re-ran native xvfb Collect/Undo on the two temporary drives: **24 actions completed, zero skipped**, comprising 12 metadata-only moves and 12 streaming-verified copies. Independent SHA-256 matched all destinations; GUI Undo restored all original 22 MXFs plus the two PMRs exactly, removed shuttle media and restored the 22-row index. Demo sample protection was supplied through `MOBBOSS_PROTECTED_PATHS`. The temporary GUI screenshots/journals are retained under `/tmp`.
