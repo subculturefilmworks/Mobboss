@@ -101,24 +101,28 @@ export function Poster({
   name,
   error,
   uncompressedTitle = false,
+  audioOnly = false,
 }: {
   path?: string;
   name: string;
   error?: string;
   uncompressedTitle?: boolean;
+  audioOnly?: boolean;
 }) {
   const label = uncompressedTitle
     ? "No preview (Avid uncompressed title)"
     : error
       ? "Preview unavailable"
-      : "No thumbnail";
+      : audioOnly
+        ? "Audio waveform pending"
+        : "No thumbnail";
   return path ? (
     <img
       className="poster"
       loading="lazy"
       decoding="async"
       src={convertFileSrc(path)}
-      alt={`Poster for ${name}`}
+      alt={`${audioOnly ? "Waveform" : "Poster"} for ${name}`}
     />
   ) : (
     <span
@@ -136,7 +140,16 @@ export function Poster({
         ? "No preview · title"
         : error
           ? "Unavailable"
-          : "No preview"}
+          : audioOnly
+            ? "Audio"
+            : "No preview"}
+    </span>
+  );
+}
+export function AudioBadge() {
+  return (
+    <span className="audio-badge" aria-label="Audio-only clip">
+      Audio
     </span>
   );
 }

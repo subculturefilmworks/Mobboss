@@ -355,6 +355,12 @@ export interface Clip {
   size: number;
   tracks: string;
 }
+export function isAudioOnly(clip: Clip): boolean {
+  return (
+    clip.files.some((f) => f.metadata.track_kind === "audio") &&
+    !clip.files.some((f) => f.metadata.track_kind === "video")
+  );
+}
 export const clipSortFields = [
   ["name", "Name"],
   ["project", "Project"],

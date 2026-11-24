@@ -53,7 +53,7 @@ overlap; no claim is made of a measured percentage of source bytes read.
 
 Both Mac and Windows release jobs run production builders against the committed
 synthetic one-second DNxHR plus two PCM MXF tracks. Each must produce a JPEG,
-return a first fragment within **8 seconds**, seek to 50% with video `tfdt` within
+produce a blue waveform JPEG for an audio-only clip, return a first fragment within **8 seconds**, seek to 50% with video `tfdt` within
 60 ms of the requested point, and decode both a video frame and stereo PCM from
 the actual fragments. Forced fallback and automatic selection use fresh sessions
 so a retained result cannot conceal an encoder failure. Missing ffmpeg fails the
@@ -63,11 +63,11 @@ still need native review; the prior rc7 disk-proxy gates passed both platforms.
 
 ## Local evidence
 
-- `cargo test --workspace`: **103 passed**, one ignored child-process helper
+- `cargo test --workspace`: **105 passed**, one ignored child-process helper
   that is launched and killed by the process cleanup test. Codec tests skip
   cleanly without an explicit ffmpeg override; the separate real-codec run passed.
 - Workspace all-target/all-feature clippy with `-D warnings`: clean.
-- Vitest: **19 passed**, including seek decisions and late-open/close fencing.
+- Vitest: **20 passed**, including seek decisions and late-open/close fencing.
 - Native Tauri Linux debug build: passed. No Linux ffmpeg is bundled.
 - Real-codec fixture gate passed with a verified LGPL FFmpeg 8.1 executable:
   first fragment about **38–61 ms**, correct seek-half timestamp, video decode
@@ -104,7 +104,18 @@ still need native review; the prior rc7 disk-proxy gates passed both platforms.
 
 Sanitized temporary Sample Drive / Sample Project copies only:
 [Clips](screenshots/clips.png), [Grid](screenshots/grid.png),
-[streaming player](screenshots/player.png), [Settings](screenshots/settings.png).
+[streaming player](screenshots/player.png), [audio waveform player](screenshots/audio-player.png),
+[Settings](screenshots/settings.png).
+Audio-only tiles and rows carry an Audio badge plus the track summary. Their
+posters use the first audio file, bounded to 60 seconds, through the existing
+two-worker priority queue. The waveform player overlays the current playhead;
+long clips label the bounded waveform sample. Audio-only fragmented MP4 is also
+smoke-tested at zero and 50%, with stereo decode and correct timestamp. The
+minimal Linux build with the Mac component subset also passed the production
+video-poster and waveform builders after enabling showwavespic. Native xvfb
+audio-only playback reached its first decoded data in 0.17 s, advanced time and
+the waveform playhead, and scrubbed to 12 s with TC 00:00:12:00 and no media error.
+
 The title placeholder now wraps and reads “No preview · title”. The accepted
 DNxUncompressed decoder limitation remains; inventory and file actions work.
 

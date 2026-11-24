@@ -1,4 +1,4 @@
-import { Poster } from "./Previews";
+import { AudioBadge, Poster } from "./Previews";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -8,6 +8,7 @@ import {
   bytes,
   duration,
   filename,
+  isAudioOnly,
   selectClip,
   timecode,
   type Clip,
@@ -164,6 +165,7 @@ export default function ClipTable({
               <Poster
                 path={thumbnails[clip.id]}
                 name={clip.name}
+                audioOnly={isAudioOnly(clip)}
                 error={thumbnailErrors[clip.id]}
                 uncompressedTitle={clip.files.some(
                   (f) => f.metadata.codec === "DNxUncompressed",
@@ -181,6 +183,7 @@ export default function ClipTable({
                 </label>
                 <small>{clip.metadata.project || "Unknown"}</small>
                 <small>
+                  {isAudioOnly(clip) && <AudioBadge />}
                   {clip.tracks} · {duration(clip.metadata) || "—"} ·{" "}
                   {bytes(clip.size)}
                 </small>
@@ -303,6 +306,7 @@ export default function ClipTable({
                     <Poster
                       path={thumbnails[clip.id]}
                       name={clip.name}
+                      audioOnly={isAudioOnly(clip)}
                       error={thumbnailErrors[clip.id]}
                       uncompressedTitle={clip.files.some(
                         (f) => f.metadata.codec === "DNxUncompressed",
@@ -344,6 +348,7 @@ export default function ClipTable({
                   {(file?.metadata || clip.metadata).project || "Unknown"}
                 </span>
                 <span className="track">
+                  {!file && isAudioOnly(clip) && <AudioBadge />}
                   {file?.metadata.track_kind || clip.tracks || "—"}
                 </span>
                 <span>{duration(file?.metadata || clip.metadata) || "—"}</span>
