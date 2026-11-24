@@ -7,3 +7,5 @@ Thumbs.db
 .env
 .idea/
 .vscode/
+**/*.tsbuildinfo
+/apps/desktop/src-tauri/gen/
