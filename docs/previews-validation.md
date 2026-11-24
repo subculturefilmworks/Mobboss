@@ -37,7 +37,7 @@ The source media tree was never written.
   arguments and mono/stereo/sync-offset construction. The real-codec test skips
   cleanly without both environment variables below.
 - Workspace all-target/all-feature clippy with `-D warnings`: clean.
-- Vitest: 10 checks; frontend production build: passes.
+- Vitest: 12 checks; frontend production build: passes.
 - Native Tauri debug and release Linux builds with `--no-bundle`: pass.
 - Real-codec integration: temporary copies of a DNxHR video, matching PCM audio,
   DNxUncompressed title and one-frame DNxHR still. Video and still JPEGs pass;
@@ -144,7 +144,7 @@ warns in its summary if the final Windows ZIP exceeds 60,000,000 bytes.
 Final Mac app/DMG and Windows application ZIP sizes cannot be measured on this
 Linux host and must be reported from the native workflow after review.
 
-The Linux release executable is **15,951,912 bytes** (15.95 MB); the debug
+The Linux release executable is **15,952,040 bytes** (15.95 MB); the debug
 executable is 230,195,824 bytes. Linux has no packaged sidecar or distributable
 bundle in this phase. These Linux sizes do not predict Mac/Windows bundle sizes.
 
@@ -159,8 +159,9 @@ bundle in this phase. These Linux sizes do not predict Mac/Windows bundle sizes.
   verified the empty-destination refusal, a four-action dry run (two moves plus
   two copies), and confirmation still disabled until acknowledged. No transfer
   was executed during this review check. Sidebar footer text is removed.
-- The reconciliation total explicitly uses `en-US` for consistent grouping under
-  the headless C locale. The panel remains collapsed by default.
+- The reconciliation total preserves the user’s locale grouping and falls back
+  to `en-US` only when the runtime has no grouping separator (including a final
+  ASCII fallback for headless C-locale webviews). The panel remains collapsed by default.
 - Native video controls are hidden. The custom transport's slider and focus use
   blue accent tokens. WebKit inspection verified `controls=false`, successful
   seeking to three seconds, and RGB(106,168,255) focus/slider colors.
@@ -174,6 +175,8 @@ bundle in this phase. These Linux sizes do not predict Mac/Windows bundle sizes.
   mono duplication and two-track merging. MP4 boxes are inspected in Rust so the
   bundle does not need ffprobe. Missing ffmpeg fails the release gate; unsupported
   native hardware encoding also fails, without silently substituting encoders.
+- A fresh post-review deep scan again found **356 files / 310 clips**; persisted
+  membership contains 356 files across 310 clip IDs. The sample stayed read-only.
 - Fixture tests exposed and fixed KAG-aligned header extents, versioned filler ULs,
   and sequence-based durations when a descriptor omits ContainerDuration. The
   bounded header-read/essence guard tests still pass.

@@ -80,6 +80,28 @@ export interface Volume {
   total: number;
 }
 export const filename = (path: string) => path.split(/[\\/]/).pop() || path;
+export function groupedInteger(
+  value: number,
+  locales?: string | string[],
+): string {
+  try {
+    const formatter = new Intl.NumberFormat(locales, {
+      maximumFractionDigits: 0,
+    });
+    if (formatter.formatToParts(10000).some((part) => part.type === "group"))
+      return formatter.format(value);
+  } catch {
+    // Some headless C-locale webviews lack working Intl grouping.
+  }
+  const fallback = value.toLocaleString("en-US", {
+    maximumFractionDigits: 0,
+    useGrouping: true,
+  });
+  if (Math.abs(value) < 1000 || fallback.includes(",")) return fallback;
+  return Math.round(value)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
 export function bytes(
   size: number,
   platform = globalThis.navigator?.platform || "",

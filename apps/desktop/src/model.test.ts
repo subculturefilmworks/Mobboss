@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   bytes,
+  groupedInteger,
   requiresDestination,
   duration,
   filter,
@@ -198,4 +199,33 @@ it("HTML thumbnails are opt-in, one per clip, constrained to JPEG data, and prin
   expect(summaryHtml([a], { [id]: "file:///private/image.jpg" })).not.toContain(
     "<img",
   );
+});
+
+describe("reconciliation number grouping", () => {
+  it("preserves the requested locale's grouping", () => {
+    expect(groupedInteger(23200945232, "en-US")).toBe("23,200,945,232");
+    expect(groupedInteger(23200945232, "de-DE")).toBe("23.200.945.232");
+    expect(groupedInteger(23200945232, "en-IN")).toBe("23,20,09,45,232");
+  });
+  it("falls back when the runtime has no grouping, including a C-locale webview", () => {
+    const parts = vi
+      .spyOn(Intl.NumberFormat.prototype, "formatToParts")
+      .mockReturnValue([{ type: "integer", value: "10000" }]);
+    try {
+      expect(groupedInteger(23200945232)).toBe("23,200,945,232");
+      const legacy = vi
+        .spyOn(Number.prototype, "toLocaleString")
+        .mockImplementation(function (this: number) {
+          return String(this.valueOf());
+        });
+      try {
+        expect(groupedInteger(23200945232)).toBe("23,200,945,232");
+        expect(groupedInteger(0)).toBe("0");
+      } finally {
+        legacy.mockRestore();
+      }
+    } finally {
+      parts.mockRestore();
+    }
+  });
 });

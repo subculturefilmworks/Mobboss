@@ -12,6 +12,7 @@ import { open, save } from "./Dialog";
 import MediaTable, { useStored } from "./MediaTable";
 import {
   bytes,
+  groupedInteger,
   filename,
   diffRows,
   filter,
@@ -640,7 +641,7 @@ function App() {
                     {r.root}: {r.media_files.toLocaleString()} media files ·{" "}
                     {r.database_files.length} Avid database files (.pmr/.mdb) ·{" "}
                     {r.other_files} other files · {r.folders} folders — total{" "}
-                    {r.total_bytes.toLocaleString("en-US")} bytes
+                    {groupedInteger(r.total_bytes)} bytes
                   </summary>
                   {r.database_files.map((db) => (
                     <p
