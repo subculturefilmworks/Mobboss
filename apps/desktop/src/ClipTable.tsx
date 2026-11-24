@@ -315,22 +315,28 @@ export default function ClipTable({
                     <Fragment>↳ {filename(file.path)}</Fragment>
                   ) : (
                     <>
-                      <button
-                        aria-label={`Expand ${clip.name}`}
-                        aria-expanded={expanded.has(clip.id)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const next = new Set(expanded);
-                          next.has(clip.id)
-                            ? next.delete(clip.id)
-                            : next.add(clip.id);
-                          setExpanded(next);
-                        }}
-                      >
-                        {expanded.has(clip.id) ? "▾" : "▸"}
-                      </button>
+                      {clip.files.length > 1 && (
+                        <button
+                          className="clip-files-pill"
+                          aria-label={`Show ${clip.files.length} files in this clip`}
+                          aria-expanded={expanded.has(clip.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const next = new Set(expanded);
+                            next.has(clip.id)
+                              ? next.delete(clip.id)
+                              : next.add(clip.id);
+                            setExpanded(next);
+                          }}
+                        >
+                          {clip.files.length} files
+                          <span
+                            className="clip-files-chevron"
+                            aria-hidden="true"
+                          />
+                        </button>
+                      )}
                       {clip.name}
-                      <small>{clip.files.length} files</small>
                     </>
                   )}
                 </span>

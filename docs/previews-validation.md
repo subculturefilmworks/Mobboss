@@ -238,7 +238,10 @@ Clips headers toggle ascending/descending sort. Clips and Grid share a persisted
 sort choice (name, project, created/modified, duration, size, start TC, tracks).
 Comparisons use natural name ordering, actual rates for duration/timecode, stable
 name/UID ties and unknown values last in both directions. Expanding clips and
-selecting all member files still works after sorting.
+selecting all member files still works after sorting. Multi-file clips use an
+accent-colored file-count pill with a rotating chevron and accessible expansion
+state; single-file clips have no expander. Native xvfb verified both states and
+that expanding does not open playback.
 
 `ThumbnailQueue` uses a mutable priority heap for pending jobs: viewport clips,
 then sorted/filtered display order, then filtered-out jobs. IntersectionObserver

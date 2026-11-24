@@ -805,14 +805,33 @@ progress {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.clip-name button {
-  padding: 2px 6px;
-  margin-right: 6px;
+.clip-files-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  margin-right: 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  font-size: 11px;
+  font-weight: 600;
 }
-.clip-name small {
-  display: block;
-  color: var(--muted);
-  margin-left: 30px;
+.clip-files-pill:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.clip-files-chevron {
+  width: 5px;
+  height: 5px;
+  margin-right: 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+}
+.clip-files-pill[aria-expanded="true"] .clip-files-chevron {
+  transform: rotate(45deg);
 }
 .clip-member {
   opacity: 0.8;
