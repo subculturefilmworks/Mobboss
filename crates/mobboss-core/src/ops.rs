@@ -331,7 +331,7 @@ fn same_stat(before: &fs::Metadata, path: &Path) -> Result<()> {
     Ok(())
 }
 /// Atomic no-replace rename on supported desktop platforms. No check-then-rename race.
-fn publish(source: &Path, dest: &Path) -> std::io::Result<()> {
+pub(crate) fn publish(source: &Path, dest: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
