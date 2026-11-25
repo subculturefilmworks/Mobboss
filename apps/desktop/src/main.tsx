@@ -1,6 +1,8 @@
+import SourcePath from "./SourcePath";
 import {
   mergeSources,
-  sourceLabel,
+  rememberMounted,
+  projectCheckState,
   checkedSources,
   sameSource,
   type Discovery,
@@ -62,6 +64,7 @@ function App() {
     roots: [],
     concurrency: 8,
     mounted_sources: [],
+    mounted_checks: {},
     custom_folders: [],
   });
   const [denied, setDenied] = useState<{ name: string; path: string }[]>([]);
@@ -190,7 +193,15 @@ function App() {
       setDenied(result.denied || []);
       await persist({
         ...settings,
-        mounted_sources: mergeSources(settings.mounted_sources, result.found),
+        mounted_sources: mergeSources(
+          settings.mounted_sources,
+          result.found,
+          settings.mounted_checks,
+        ),
+        mounted_checks: rememberMounted(
+          settings.mounted_sources,
+          settings.mounted_checks,
+        ),
         custom_folders: settings.custom_folders.map((row) => ({
           ...row,
           offline: !result.online.some((p) => sameSource(p, row.path)),
@@ -260,6 +271,13 @@ function App() {
     action().catch((e) => setNotice(String(e)));
   };
   async function persist(value: Settings) {
+    value = {
+      ...value,
+      mounted_checks: rememberMounted(
+        value.mounted_sources,
+        value.mounted_checks,
+      ),
+    };
     const revision = ++settingsRevision.current;
     const previous = settings;
     setSettings(value);
@@ -459,7 +477,7 @@ function App() {
           </button>
           <div className="rail-lists">
             {(["mounted_sources", "custom_folders"] as const).map((kind) => (
-              <section key={kind}>
+              <section key={kind} data-source-kind={kind}>
                 <div className="section-label">
                   {kind === "mounted_sources"
                     ? "Mounted Sources"
@@ -496,27 +514,26 @@ function App() {
                           )
                         }
                       />
-                      <span>
-                        {sourceLabel(row)}
-                        {row.offline && <small> offline</small>}
-                      </span>
+                      <SourcePath row={row} />
                     </label>
-                    <button
-                      aria-label={`Remove source ${row.path}`}
-                      disabled={busy || searching}
-                      onClick={() =>
-                        run(() =>
-                          persist({
-                            ...settings,
-                            [kind]: settings[kind].filter(
-                              (r) => !sameSource(r.path, row.path),
-                            ),
-                          }),
-                        )
-                      }
-                    >
-                      ×
-                    </button>
+                    {kind === "custom_folders" && (
+                      <button
+                        aria-label={`Remove source ${row.path}`}
+                        disabled={busy || searching}
+                        onClick={() =>
+                          run(() =>
+                            persist({
+                              ...settings,
+                              [kind]: settings[kind].filter(
+                                (r) => !sameSource(r.path, row.path),
+                              ),
+                            }),
+                          )
+                        }
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
                 ))}
               </section>
@@ -524,17 +541,39 @@ function App() {
             <div className="section-label projects-label">
               Projects <span>{summary.length}</span>
             </div>
-            <button
-              className={`project ${!filters.projects.length ? "active" : ""}`}
-              onClick={() => setFilter("projects", [])}
+            <div
+              className={`project project-all ${!filters.projects.length ? "active" : ""}`}
             >
-              <span>All projects</span>
-              <small>
-                <span title={`${totalSize(files)} bytes`}>
+              <input
+                type="checkbox"
+                aria-label="All projects"
+                checked={
+                  projectCheckState(
+                    summary.map((p) => p.name),
+                    filters.projects,
+                  ).checked
+                }
+                ref={(node) => {
+                  if (node)
+                    node.indeterminate = projectCheckState(
+                      summary.map((p) => p.name),
+                      filters.projects,
+                    ).indeterminate;
+                }}
+                onChange={(e) =>
+                  setFilter(
+                    "projects",
+                    e.target.checked ? summary.map((p) => p.name) : [],
+                  )
+                }
+              />
+              <button onClick={() => setFilter("projects", [])}>
+                <span>All projects</span>
+                <small title={`${totalSize(files)} bytes`}>
                   {bytes(totalSize(files))}
-                </span>
-              </small>
-            </button>
+                </small>
+              </button>
+            </div>
             {summary.map((p) => (
               <label
                 className={`project ${filters.projects.includes(p.name) ? "active" : ""}`}

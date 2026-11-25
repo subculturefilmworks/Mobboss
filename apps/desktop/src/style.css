@@ -1280,3 +1280,33 @@ aside > button {
 .permission-hint {
   font-size: 11px;
 }
+
+/* Keep the rail stable at narrow desktop widths; the media table scrolls inside main. */
+aside {
+  flex: 0 0 320px;
+}
+.source-row,
+.source-row label {
+  align-items: center;
+}
+.source-row label span.source-path {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  overflow-wrap: normal;
+}
+.project-all {
+  justify-content: start;
+}
+.project-all > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}

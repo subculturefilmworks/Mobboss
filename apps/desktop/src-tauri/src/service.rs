@@ -28,6 +28,7 @@ pub struct Settings {
     pub roots: Vec<PathBuf>,
     pub concurrency: usize,
     pub mounted_sources: Vec<SourceRow>,
+    pub mounted_checks: std::collections::BTreeMap<String, bool>,
     pub custom_folders: Vec<SourceRow>,
 }
 #[derive(Deserialize)]
@@ -37,6 +38,8 @@ struct SettingsData {
     concurrency: usize,
     #[serde(default)]
     mounted_sources: Vec<SourceRow>,
+    #[serde(default)]
+    mounted_checks: std::collections::BTreeMap<String, bool>,
     custom_folders: Option<Vec<SourceRow>>,
 }
 impl From<SettingsData> for Settings {
@@ -57,6 +60,7 @@ impl From<SettingsData> for Settings {
             roots: data.roots,
             concurrency: data.concurrency,
             mounted_sources: data.mounted_sources,
+            mounted_checks: data.mounted_checks,
             custom_folders,
         }
     }
@@ -83,6 +87,7 @@ impl Settings {
             roots: vec![],
             concurrency: 8,
             mounted_sources: vec![],
+            mounted_checks: Default::default(),
             custom_folders: vec![],
         })
     }
@@ -339,6 +344,81 @@ pub fn reveal(path: &Path, settings: &Settings) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn custom_folder_scan_is_recursive_and_does_not_follow_symlinks() {
+        let dir =
+            std::env::temp_dir().join(format!("mobboss-custom-recursive-{}", std::process::id()));
+        let root = dir.join("Project-Island");
+        fs::create_dir_all(root.join("Backup/Media/Nested")).unwrap();
+        fs::create_dir_all(dir.join("Outside-Island")).unwrap();
+        let header = include_bytes!("../../../../tests/fixtures/video.header");
+        for path in [
+            "direct.mxf",
+            "Backup/child.mxf",
+            "Backup/Media/Nested/deep.mxf",
+        ] {
+            fs::write(root.join(path), header).unwrap();
+        }
+        fs::write(dir.join("Outside-Island/external.mxf"), header).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("Outside-Island"), root.join("linked-folder"))
+                .unwrap();
+            std::os::unix::fs::symlink(
+                dir.join("Outside-Island/external.mxf"),
+                root.join("linked-file.mxf"),
+            )
+            .unwrap();
+        }
+        let mut settings: Settings = serde_json::from_value(serde_json::json!({
+            "index": dir.join("catalog.sqlite"), "roots": [], "concurrency": 2,
+            "custom_folders": [{"path": root, "checked": true}]
+        }))
+        .unwrap();
+        settings.roots = settings.checked_roots();
+        for mode in [
+            mobboss_core::ScanMode::Quick,
+            mobboss_core::ScanMode::Auto,
+            mobboss_core::ScanMode::Deep,
+        ] {
+            let reports = scan(
+                &settings,
+                &ScanOptions {
+                    mode,
+                    concurrency: 2,
+                },
+                &CancellationToken::default(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(reports[0].files, 3);
+            let indexed = files(&settings).unwrap();
+            assert_eq!(indexed.len(), 3);
+            assert!(indexed
+                .iter()
+                .any(|file| file.path.ends_with("Backup/Media/Nested/deep.mxf")));
+            assert!(indexed
+                .iter()
+                .all(|file| !file.path.to_string_lossy().contains("linked")));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn mounted_tick_memory_survives_settings_roundtrip_without_rows() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "index": "catalog.sqlite", "roots": [], "concurrency": 8,
+            "mounted_sources": [], "mounted_checks": {"e:/avid mediafiles/mxf/1": false},
+            "custom_folders": []
+        }))
+        .unwrap();
+        let saved = serde_json::to_value(settings).unwrap();
+        let restored: Settings = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            restored.mounted_checks.get("e:/avid mediafiles/mxf/1"),
+            Some(&false)
+        );
+        assert!(restored.checked_roots().is_empty());
+    }
+    #[test]
     fn only_checked_rows_are_scan_roots() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "index": "catalog.sqlite", "roots": ["/Old-Island"], "concurrency": 8,
@@ -398,6 +478,7 @@ mod tests {
             roots: vec![root.clone()],
             concurrency: 2,
             mounted_sources: vec![],
+            mounted_checks: Default::default(),
             custom_folders: vec![],
         };
         let options = ScanOptions {

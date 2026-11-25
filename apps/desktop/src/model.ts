@@ -72,6 +72,7 @@ export interface Settings {
   roots: string[];
   concurrency: number;
   mounted_sources: import("./sources").SourceRow[];
+  mounted_checks: Record<string, boolean>;
   custom_folders: import("./sources").SourceRow[];
 }
 export interface Volume {

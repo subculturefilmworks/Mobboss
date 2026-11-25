@@ -38,28 +38,57 @@ export interface SourceRow {
   offline: boolean;
   volume: string;
 }
+export function rememberMounted(
+  rows: SourceRow[],
+  checks: Record<string, boolean> = {},
+) {
+  return {
+    ...checks,
+    ...Object.fromEntries(rows.map((row) => [key(row.path), row.checked])),
+  };
+}
 export function mergeSources(
   rows: SourceRow[],
   found: FoundSource[],
+  checks: Record<string, boolean> = {},
 ): SourceRow[] {
-  return [
-    ...rows.map((row) => ({
-      ...row,
-      offline: !found.some((s) => sameSource(s.path, row.path)),
-    })),
-    ...found
-      .filter(
-        (s, i) =>
-          !rows.some((row) => sameSource(row.path, s.path)) &&
-          !found.slice(0, i).some((other) => sameSource(other.path, s.path)),
-      )
-      .map((s) => ({
-        path: s.path,
-        checked: true,
-        offline: false,
-        volume: s.volume,
-      })),
-  ];
+  const remembered = rememberMounted(rows, checks);
+  return found
+    .filter(
+      (source, i) =>
+        !found.slice(0, i).some((other) => sameSource(other.path, source.path)),
+    )
+    .map((source) => ({
+      path: source.path,
+      volume: source.volume,
+      checked: remembered[key(source.path)] ?? true,
+      offline: false,
+    }));
+}
+export function projectCheckState(names: string[], selected: string[]) {
+  const count = names.filter((name) => selected.includes(name)).length;
+  return {
+    checked: names.length > 0 && count === names.length,
+    indeterminate: count > 0 && count < names.length,
+  };
+}
+/** Measure in pixels in the UI; tests can supply a deterministic character measure. */
+export function middleEllipsis(
+  label: string,
+  width: number,
+  measure: (text: string) => number,
+): string {
+  if (measure(label) <= width) return label;
+  const tail =
+    label.match(/[\\/]MXF[\\/][^\\/]+$/i)?.[0] ||
+    label.match(/[\\/][^\\/]+$/)?.[0] ||
+    label;
+  const head = label.slice(0, label.length - tail.length);
+  // Keep the drive/volume at the beginning and the complete MXF folder at the end.
+  let length = head.length;
+  while (length > 0 && measure(head.slice(0, length) + "…" + tail) > width)
+    length--;
+  return head.slice(0, length) + "…" + tail;
 }
 export const checkedSources = (settings: {
   mounted_sources: SourceRow[];

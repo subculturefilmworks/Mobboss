@@ -7,10 +7,16 @@ Run the UI server with `npm run dev --prefix apps/desktop`, then run
 `UI_URL` can override the default http://127.0.0.1:1420.
 
 The browser test uses a mocked desktop bridge. It verifies no detection during
-startup, 5.5 seconds idle, or focus; explicit Search merging and offline retention;
+startup, 5.5 seconds idle, or focus; explicit Search pruning and unplug/replug tick memory;
 Add folder without scanning; Scan disabled with no checked sources; and the exact
-checked paths submitted for scanning. Rust separately tests the command's checked
-root selection. The test regenerates sources-rail-v2.png from dark and light
+checked paths submitted for scanning. It also checks the All projects
+all/none/mixed states and label reset, Mounted Sources without remove buttons,
+Custom Folders with remove buttons, and single-line rows plus table fit at
+1280 and 1024 px. The rail stays 320 px wide at both sizes. Rust separately tests
+the command's checked root selection, serialized tick memory without mounted rows,
+and recursive Custom Folder scanning in Quick/Auto/Deep modes. On Unix the
+recursive test also includes directory and file symlinks and verifies neither
+is followed. The test regenerates sources-rail-v2.png from dark and light
 screenshots of the actual rail.
 
 Cross-target Rust checking on this Linux machine:
