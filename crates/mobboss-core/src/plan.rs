@@ -85,8 +85,17 @@ pub fn sanitize(name: &str) -> String {
         s.to_string()
     }
 }
+/// Label for media whose headers name no project.
+pub const UNKNOWN_PROJECT: &str = "Unknown project";
+/// On disk, media without a project is collected into a folder named "Unknown".
+pub const UNKNOWN_PROJECT_DIR: &str = "Unknown";
 pub fn project_dir(root: &Path, project: &str) -> PathBuf {
-    root.join(MEDIA_BY_PROJECT).join(sanitize(project))
+    let name = if project == UNKNOWN_PROJECT {
+        UNKNOWN_PROJECT_DIR
+    } else {
+        project
+    };
+    root.join(MEDIA_BY_PROJECT).join(sanitize(name))
 }
 use crate::paths::key as path_key;
 #[cfg(test)]
@@ -335,6 +344,18 @@ pub fn build(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_project_collects_into_unknown_folder() {
+        let root = std::path::Path::new("/dest");
+        assert_eq!(
+            super::project_dir(root, super::UNKNOWN_PROJECT),
+            root.join(super::MEDIA_BY_PROJECT).join("Unknown")
+        );
+        assert_eq!(
+            super::project_dir(root, "Film"),
+            root.join(super::MEDIA_BY_PROJECT).join("Film")
+        );
+    }
     use super::*;
     use crate::MediaMetadata;
     fn input(root: &str, name: &str) -> Input {
