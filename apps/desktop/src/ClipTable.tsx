@@ -181,7 +181,7 @@ export default function ClipTable({
                   />
                   <b title={clip.name}>{clip.name}</b>
                 </label>
-                <small>{clip.metadata.project || "Unknown"}</small>
+                <small>{clip.metadata.project || "Unknown project"}</small>
                 <small>
                   {isAudioOnly(clip) && <AudioBadge />}
                   {clip.tracks} · {duration(clip.metadata) || "—"} ·{" "}
@@ -345,7 +345,7 @@ export default function ClipTable({
                   )}
                 </span>
                 <span>
-                  {(file?.metadata || clip.metadata).project || "Unknown"}
+                  {(file?.metadata || clip.metadata).project || "Unknown project"}
                 </span>
                 <span className="track">
                   {!file && isAudioOnly(clip) && <AudioBadge />}

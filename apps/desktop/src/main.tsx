@@ -5,6 +5,7 @@ import {
   projectCheckState,
   checkedSources,
   sameSource,
+  scopeFiles,
   type Discovery,
 } from "./sources";
 import React, {
@@ -58,7 +59,6 @@ function App() {
   const [player, setPlayer] = useState<Clip | null>(null);
   const [files, setFiles] = useState<MediaFile[]>([]);
   const previews = usePreviews(desktop, files);
-  const [archived, setArchived] = useState<MediaFile[]>([]);
   const [settings, setSettings] = useState<Settings>({
     index: "",
     roots: [],
@@ -99,7 +99,6 @@ function App() {
     setFiles(await invoke<MediaFile[]>("files"));
     setSelected(new Set());
     setReports([]);
-    setArchived([]);
   }, []);
   const [reports, setReports] = useState<Report[]>([]);
   const [notice, setNotice] = useState(
@@ -142,12 +141,6 @@ function App() {
           "scan-finished",
           ({ payload: r }) => {
             pending.current.clear();
-            setArchived([]);
-            const paths = (r.Ok || []).flatMap((report) => report.diff.missing);
-            if (paths.length)
-              invoke<MediaFile[]>("missing_files", { paths })
-                .then(setArchived)
-                .catch((e) => setNotice(String(e)));
             setBusy(false);
             if (r.Err) setNotice(r.Err);
             else {
@@ -211,27 +204,31 @@ function App() {
       setSearching(false);
     }
   }
-  const rows = useMemo(
-    () => diffRows(files, reports, archived),
-    [files, reports, archived],
-  );
+  const roots = useMemo(() => checkedSources(settings), [settings]);
+  const scopedFiles = useMemo(() => scopeFiles(files, roots), [files, roots]);
+  const [projectScope, setProjectScope] = useState(false);
+  const rows = useMemo(() => {
+    const indexed = new Set(scopedFiles.map((f) => f.path));
+    return diffRows(scopedFiles, reports).filter((r) =>
+      indexed.has(r.file.path),
+    );
+  }, [scopedFiles, reports]);
   const filtered = useMemo(
     () =>
-      filter(
-        filters.diff ? rows : rows.filter((r) => r.values.diff !== "missing"),
-        filters,
-      ),
-    [rows, filters],
+      projectScope && !filters.projects.length
+        ? []
+        : filter(
+            filters.diff
+              ? rows
+              : rows.filter((r) => r.values.diff !== "missing"),
+            filters,
+          ),
+    [rows, filters, projectScope],
   );
   const clips = useMemo(() => {
-    const matching = new Set(filtered.map((r) => r.file.path));
-    return sortClips(
-      groupClips(rows.map((r) => r.file)).filter((c) =>
-        c.files.some((f) => matching.has(f.path)),
-      ),
-      clipSort,
-    );
-  }, [rows, filtered, clipSort]);
+    return sortClips(groupClips(filtered.map((r) => r.file)), clipSort);
+  }, [filtered, clipSort]);
+  const visibleFiles = useMemo(() => filtered.map((r) => r.file), [filtered]);
   useEffect(() => {
     if (desktop)
       invoke("prioritize", {
@@ -260,13 +257,15 @@ function App() {
         setNotice(String(e));
       });
   }, [ready, busy, previews.status.available, clips, visibleClips, view]);
-  const summary = useMemo(() => projects(files), [files]);
+  const summary = useMemo(() => projects(scopedFiles), [scopedFiles]);
   const selectedRows = useMemo(
-    () => rows.filter((r) => selected.has(r.file.path)),
-    [rows, selected],
+    () => filtered.filter((r) => selected.has(r.file.path)),
+    [filtered, selected],
   );
-  const setFilter = <K extends keyof Filters>(key: K, value: Filters[K]) =>
+  const setFilter = <K extends keyof Filters>(key: K, value: Filters[K]) => {
+    if (key === "projects") setProjectScope(true);
     setFilters((old) => ({ ...old, [key]: value }));
+  };
   const run = (action: () => Promise<unknown>) => {
     action().catch((e) => setNotice(String(e)));
   };
@@ -299,7 +298,6 @@ function App() {
     await persist({ ...settings, roots });
     pending.current.clear();
     setReports([]);
-    setArchived([]);
     setProgress(null);
     setBusy(true);
     setNotice("Scanning read-only…");
@@ -365,12 +363,12 @@ function App() {
     }
   }
   const codecs = [
-    ...new Set(files.map((f) => f.metadata.codec).filter(Boolean)),
+    ...new Set(scopedFiles.map((f) => f.metadata.codec).filter(Boolean)),
   ].sort() as string[];
   const tracks = [
-    ...new Set(files.map((f) => f.metadata.track_kind).filter(Boolean)),
+    ...new Set(scopedFiles.map((f) => f.metadata.track_kind).filter(Boolean)),
   ].sort() as string[];
-  const folders = [...new Set(files.map((f) => f.folder))].sort();
+  const folders = [...new Set(scopedFiles.map((f) => f.folder))].sort();
   return (
     <div className="app">
       <header>
@@ -395,7 +393,9 @@ function App() {
               <div className="summary-exports">
                 <button
                   onClick={() =>
-                    run(() => exportContent("projects.csv", summaryCsv(files)))
+                    run(() =>
+                      exportContent("projects.csv", summaryCsv(visibleFiles)),
+                    )
                   }
                 >
                   CSV ↗
@@ -408,14 +408,16 @@ function App() {
                           ? await invoke<Record<string, string>>(
                               "thumbnail_data",
                               {
-                                clipIds: groupClips(files).map((c) => c.id),
+                                clipIds: groupClips(visibleFiles).map(
+                                  (c) => c.id,
+                                ),
                               },
                             )
                           : undefined;
                       await exportContent(
                         "projects.html",
                         summaryHtml(
-                          files,
+                          visibleFiles,
                           includeThumbnails ? thumbnails || {} : undefined,
                         ),
                       );
@@ -429,9 +431,9 @@ function App() {
           </details>
           <Operations
             disabled={!ready || busy}
-            files={files}
+            files={visibleFiles}
             project={filters.projects.length === 1 ? filters.projects[0] : ""}
-            selected={selected}
+            selected={new Set(selectedRows.map((r) => r.file.path))}
             onBusy={operationBusy}
             onRefresh={refresh}
             onError={setNotice}
@@ -475,6 +477,25 @@ function App() {
           >
             Scan
           </button>
+          <div className="scan-modes" role="group" aria-label="Scan mode">
+            {["quick", "auto", "deep"].map((value) => (
+              <button
+                key={value}
+                aria-pressed={mode === value}
+                disabled={busy}
+                onClick={() => setMode(value)}
+              >
+                {value[0].toUpperCase() + value.slice(1)}
+              </button>
+            ))}
+          </div>
+          <p className="hint scan-hint">
+            {mode === "quick"
+              ? "Quick: read new or changed headers."
+              : mode === "auto"
+                ? "Auto: quick with databases, deep elsewhere."
+                : "Deep: read every media header."}
+          </p>
           <div className="rail-lists">
             {(["mounted_sources", "custom_folders"] as const).map((kind) => (
               <section key={kind} data-source-kind={kind}>
@@ -539,7 +560,10 @@ function App() {
               </section>
             ))}
             <div className="section-label projects-label">
-              Projects <span>{summary.length}</span>
+              Projects{" "}
+              <span>
+                {summary.length} projects · {bytes(totalSize(scopedFiles))}
+              </span>
             </div>
             <div
               className={`project project-all ${!filters.projects.length ? "active" : ""}`}
@@ -567,10 +591,15 @@ function App() {
                   )
                 }
               />
-              <button onClick={() => setFilter("projects", [])}>
+              <button
+                onClick={() => {
+                  setFilter("projects", []);
+                  setProjectScope(false);
+                }}
+              >
                 <span>All projects</span>
-                <small title={`${totalSize(files)} bytes`}>
-                  {bytes(totalSize(files))}
+                <small title={`${totalSize(scopedFiles)} bytes`}>
+                  {bytes(totalSize(scopedFiles))}
                 </small>
               </button>
             </div>
@@ -626,14 +655,11 @@ function App() {
                 disabled={!filtered.length}
                 onClick={() =>
                   run(() =>
-                    exportContent(
-                      "mobboss-media.csv",
-                      tableCsv(selectedRows.length ? selectedRows : filtered),
-                    ),
+                    exportContent("mobboss-media.csv", tableCsv(filtered)),
                   )
                 }
               >
-                Export {selectedRows.length ? "selected" : "filtered"} CSV ↗
+                Export filtered CSV ↗
               </button>
             </div>
           </div>
@@ -762,7 +788,11 @@ function App() {
               )
             )}
           </div>
-          {view !== "files" ? (
+          {!roots.length ? (
+            <p className="hint empty-selection">
+              Nothing selected. Tick a folder on the left to see its media.
+            </p>
+          ) : view !== "files" ? (
             <ClipTable
               sort={clipSort}
               setSort={setClipSort}
@@ -852,9 +882,9 @@ function App() {
           </div>
           <footer>
             <span>
-              <b>{files.length.toLocaleString()}</b> files ·{" "}
-              <span title={`${totalSize(files)} bytes`}>
-                {bytes(totalSize(files))}
+              <b>{scopedFiles.length.toLocaleString()}</b> files ·{" "}
+              <span title={`${totalSize(scopedFiles)} bytes`}>
+                {bytes(totalSize(scopedFiles))}
               </span>
             </span>
             <span>
@@ -910,18 +940,6 @@ function App() {
               Default: your local app-data folder. The index and exported
               reports must stay outside media sources.
             </p>
-            <label>
-              Scan mode
-              <select
-                value={mode}
-                disabled={busy}
-                onChange={(e) => setMode(e.target.value)}
-              >
-                <option value="quick">Quick</option>
-                <option value="auto">Auto</option>
-                <option value="deep">Deep</option>
-              </select>
-            </label>
             <label>
               Parallel header reads
               <input

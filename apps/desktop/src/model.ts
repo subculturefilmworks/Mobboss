@@ -170,7 +170,7 @@ export function row(file: MediaFile, diff = ""): Row {
   const values = {
     filename: filename(file.path),
     clip: m.clip_name || "",
-    project: m.project || "Unknown",
+    project: m.project || "Unknown project",
     size: file.size,
     created: m.created || "",
     modified:
@@ -233,13 +233,17 @@ export function projects(files: MediaFile[]) {
     { name: string; count: number; size: number }
   >();
   for (const file of files) {
-    const name = file.metadata.project || "Unknown";
+    const name = file.metadata.project || "Unknown project";
     const p = summary.get(name) || { name, count: 0, size: 0 };
     p.count++;
     p.size += file.size;
     summary.set(name, p);
   }
-  return [...summary.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return [...summary.values()].sort(
+    (a, b) =>
+      Number(a.name === "Unknown project") -
+        Number(b.name === "Unknown project") || a.name.localeCompare(b.name),
+  );
 }
 export const totalSize = (rows: MediaFile[]) =>
   rows.reduce((n, r) => n + r.size, 0);
@@ -294,7 +298,7 @@ export function summaryHtml(
             src && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(src)
               ? `<img width="160" alt="Clip poster" src="${src}">`
               : "Unavailable";
-          return `<tr><td>${poster}</td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.metadata.project || "Unknown")}</td><td>${escapeHtml(c.tracks)}</td><td>${duration(c.metadata)}</td><td>${timecode(c.metadata)}</td></tr>`;
+          return `<tr><td>${poster}</td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.metadata.project || "Unknown project")}</td><td>${escapeHtml(c.tracks)}</td><td>${duration(c.metadata)}</td><td>${timecode(c.metadata)}</td></tr>`;
         })
         .join("")}</tbody></table>`
     : "";

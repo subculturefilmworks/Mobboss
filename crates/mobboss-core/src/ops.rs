@@ -142,7 +142,7 @@ fn prepare_with(
                 return false;
             }
             if paths.is_empty() {
-                f.metadata.project.as_deref().unwrap_or("Unknown") == project
+                f.metadata.project.as_deref().unwrap_or("Unknown project") == project
             } else {
                 wanted.contains(&crate::paths::key(&f.path))
             }

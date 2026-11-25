@@ -32,3 +32,16 @@ The same C-dependency bypass also passed with
 `--target x86_64-pc-windows-msvc`. Linux desktop-feature tests and clippy
 compile the native shell. Cross checks cover the services/discovery library,
 without the Tauri desktop feature; native Mac and Windows bundles remain unverified.
+
+Selection-scoped results: ticks form a union of online roots with one record per
+normalized file path. Unticking preserves the index; reticking needs no scan.
+Projects and codec/track options derive from that union. Project ticks and table
+filters then narrow the table, operations, CSV and HTML exports. Unknown project
+sorts last. The All projects checkbox supports all/none/mixed; the label resets
+to all projects. Nothing selected shows only the quiet folder-selection hint.
+Quick/Auto/Deep is persisted and lives under Scan, outside Settings.
+
+The regression browser suite also verifies tick/untick/retick without scanning,
+Unknown project ordering, project/search-scoped summary export, empty project
+selection, the rail scan control, and the no-folder hint. Unit tests cover path
+boundaries, Windows aliases, nested roots, offline exclusion and scoped exports.

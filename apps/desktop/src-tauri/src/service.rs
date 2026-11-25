@@ -67,11 +67,24 @@ impl From<SettingsData> for Settings {
 }
 impl Settings {
     pub fn checked_roots(&self) -> Vec<PathBuf> {
-        self.mounted_sources
+        let roots: Vec<_> = self
+            .mounted_sources
             .iter()
             .chain(&self.custom_folders)
-            .filter(|row| row.checked)
+            .filter(|row| row.checked && !row.offline)
             .map(|row| row.path.clone())
+            .collect();
+        roots
+            .iter()
+            .enumerate()
+            .filter(|(i, root)| {
+                !roots.iter().enumerate().any(|(j, parent)| {
+                    *i != j
+                        && mobboss_core::paths::contains(root, parent)
+                        && (!mobboss_core::paths::same(root, parent) || j < *i)
+                })
+            })
+            .map(|(_, root)| root.clone())
             .collect()
     }
     pub fn load() -> Result<Self> {
@@ -428,16 +441,15 @@ mod tests {
             ],
             "custom_folders": [
                 {"path": "/Project-Island/Backup", "checked": false},
+                {"path": "/Project-Island/Media", "checked": true},
+                {"path": "/Project-Island/Media/Nested", "checked": true},
                 {"path": "/Project-Island/Media", "checked": true}
             ]
         }))
         .unwrap();
         assert_eq!(
             settings.checked_roots(),
-            vec![
-                PathBuf::from("/Media-Island/MXF/1"),
-                PathBuf::from("/Project-Island/Media")
-            ]
+            vec![PathBuf::from("/Project-Island/Media")]
         );
     }
     #[test]

@@ -275,7 +275,7 @@ fn main() -> Result<()> {
                 for f in files {
                     println!(
                         "{}\t{}\t{}",
-                        f.metadata.project.as_deref().unwrap_or("Unknown"),
+                        f.metadata.project.as_deref().unwrap_or("Unknown project"),
                         f.metadata.codec.as_deref().unwrap_or("Unknown"),
                         mobboss_core::paths::display(&f.path).display()
                     );

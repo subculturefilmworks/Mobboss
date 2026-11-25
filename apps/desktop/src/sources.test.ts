@@ -6,6 +6,7 @@ import {
   mergeSources,
   sourceLabel,
   checkedSources,
+  scopeFiles,
 } from "./sources";
 const found = [
   {
@@ -85,7 +86,7 @@ describe("persisted source rows", () => {
       )[0].checked,
     ).toBe(true);
   });
-  it("scans only checked rows in both lists, retaining offline selections", () => {
+  it("excludes offline checked rows without changing their ticks", () => {
     const row = (path: string, checked: boolean) => ({
       path,
       checked,
@@ -103,7 +104,7 @@ describe("persisted source rows", () => {
           row("M:/Project/Media", true),
         ],
       }),
-    ).toEqual(["E:/Avid MediaFiles/MXF/1", "M:/Project/Media"]);
+    ).toEqual([]);
   });
 });
 
@@ -166,4 +167,23 @@ it("reports none, some, and all project ticks, ignoring stale project names", ()
     checked: true,
     indeterminate: false,
   });
+});
+
+it("uses a deduped union with path boundaries and Windows aliases, and reticks without rescanning", () => {
+  const files = [
+    { path: "E:/Story/Media/a.mxf" },
+    { path: "e:\\Story\\Media\\a.mxf" },
+    { path: "E:/Story/Media2/b.mxf" },
+  ];
+  const rows = [
+    { path: "E:/Story", checked: true, offline: false, volume: "" },
+    { path: "E:/Story/Media", checked: true, offline: false, volume: "" },
+  ];
+  expect(checkedSources({ mounted_sources: rows, custom_folders: [] })).toEqual(
+    ["E:/Story"],
+  );
+  expect(scopeFiles(files, ["E:/Story/Media"])).toEqual([files[0]]);
+  expect(scopeFiles(files, [])).toEqual([]);
+  expect(scopeFiles(files, ["E:/Story/Media"])).toEqual([files[0]]);
+  expect(files).toHaveLength(3);
 });

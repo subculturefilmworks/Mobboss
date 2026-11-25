@@ -10,16 +10,16 @@ export interface Discovery {
   online: string[];
 }
 // Match the backend path comparison, including Windows extended/UNC spelling.
-const key = (p: string) =>
+export const pathKey = (p: string) =>
   p
     .replaceAll("\\", "/")
     .replace(/^\/\/\?\/UNC\//i, "//")
     .replace(/^\/\/\?\//, "")
     .replace(/\/$/, "")
     .toLowerCase();
-export const sameSource = (a: string, b: string) => key(a) === key(b);
-const covered = (p: string, root: string) =>
-  key(p) === key(root) || key(p).startsWith(key(root) + "/");
+export const sameSource = (a: string, b: string) => pathKey(a) === pathKey(b);
+export const covered = (p: string, root: string) =>
+  pathKey(p) === pathKey(root) || pathKey(p).startsWith(pathKey(root) + "/");
 /** Listing is read-only. Covered sources and duplicate mount aliases are omitted. */
 export function availableSources(
   found: FoundSource[],
@@ -44,7 +44,7 @@ export function rememberMounted(
 ) {
   return {
     ...checks,
-    ...Object.fromEntries(rows.map((row) => [key(row.path), row.checked])),
+    ...Object.fromEntries(rows.map((row) => [pathKey(row.path), row.checked])),
   };
 }
 export function mergeSources(
@@ -61,7 +61,7 @@ export function mergeSources(
     .map((source) => ({
       path: source.path,
       volume: source.volume,
-      checked: remembered[key(source.path)] ?? true,
+      checked: remembered[pathKey(source.path)] ?? true,
       offline: false,
     }));
 }
@@ -95,8 +95,17 @@ export const checkedSources = (settings: {
   custom_folders: SourceRow[];
 }) =>
   [...settings.mounted_sources, ...settings.custom_folders]
-    .filter((row) => row.checked)
-    .map((row) => row.path);
+    .filter((row) => row.checked && !row.offline)
+    .map((row) => row.path)
+    .filter(
+      (path, i, paths) =>
+        !paths.some(
+          (other, j) =>
+            j !== i &&
+            covered(path, other) &&
+            (!sameSource(path, other) || j < i),
+        ),
+    );
 
 export function sourceLabel(
   row: SourceRow,
@@ -105,4 +114,19 @@ export function sourceLabel(
   return /mac/i.test(platform) && row.volume
     ? `${row.volume} · ${row.path}`
     : row.path;
+}
+
+/** A union of selected roots, retaining one indexed record per normalized path. */
+export function scopeFiles<T extends { path: string }>(
+  files: T[],
+  roots: string[],
+): T[] {
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    const key = pathKey(file.path);
+    if (seen.has(key) || !roots.some((root) => covered(file.path, root)))
+      return false;
+    seen.add(key);
+    return true;
+  });
 }

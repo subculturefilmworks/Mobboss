@@ -59,22 +59,19 @@ await page.addInitScript(() => {
         return args.value;
       }
       if (cmd === "files")
-        return [
-          "Moon Orchard",
-          "Paper Harbor",
-          "Amber Transit",
-          "Winter Signal",
-        ].map((project, i) => ({
-          path: `/Volumes/Story-Island/Avid MediaFiles/MXF/1/clip${i}.mxf`,
-          folder: "/Volumes/Story-Island/Avid MediaFiles/MXF/1",
-          size: 1234567890 * (i + 1),
-          modified_ns: "0",
-          metadata: {
-            project,
-            clip_name: "Scene " + (i + 1),
-            track_kind: "video",
-          },
-        }));
+        return ["Moon Orchard", "Paper Harbor", "Amber Transit", ""].map(
+          (project, i) => ({
+            path: `/Volumes/Story-Island/Avid MediaFiles/MXF/1/clip${i}.mxf`,
+            folder: "/Volumes/Story-Island/Avid MediaFiles/MXF/1",
+            size: 1234567890 * (i + 1),
+            modified_ns: "0",
+            metadata: {
+              project,
+              clip_name: "Scene " + (i + 1),
+              track_kind: "video",
+            },
+          }),
+        );
       if (cmd === "preview_status")
         return {
           available: false,
@@ -110,7 +107,10 @@ await page.addInitScript(() => {
               denied: [],
               online: ["/Volumes/Story-Island/Avid MediaFiles/MXF/1"],
             };
-      if (cmd === "pick_path") return ["/Volumes/Added-Island/Media/MXF/1"];
+      if (cmd === "pick_path")
+        return args.save
+          ? ["/Catalog-Island/" + args.options.defaultPath]
+          : ["/Volumes/Added-Island/Media/MXF/1"];
       return null;
     },
   };
@@ -133,6 +133,35 @@ assert.equal(
   await page.getByRole("button", { name: "Scan", exact: true }).isEnabled(),
   true,
 );
+// Results follow ticks immediately, without a scan; Unknown is last.
+assert.equal(
+  await page
+    .locator("label.project")
+    .last()
+    .innerText()
+    .then((t) => t.includes("Unknown project")),
+  true,
+);
+const storyTick = page
+  .locator('[data-source-kind="mounted_sources"] input')
+  .first();
+await storyTick.uncheck();
+assert.equal(await page.locator("label.project").count(), 0);
+await storyTick.check();
+assert.equal(await page.locator("label.project").count(), 4);
+assert.equal(
+  await page.evaluate(
+    () => window.calls.filter((c) => c.cmd === "start_scan").length,
+  ),
+  0,
+);
+assert.equal(
+  await page.locator("aside [aria-label='Scan mode'] button").count(),
+  3,
+);
+await page.getByRole("button", { name: "Settings", exact: true }).click();
+assert.equal(await page.locator(".modal [aria-label='Scan mode']").count(), 0);
+await page.getByRole("button", { name: "Close", exact: true }).click();
 // Discovery is explicit, keeps existing checks, and never scans.
 await page
   .getByRole("button", { name: "Search for databases", exact: true })
@@ -185,6 +214,27 @@ assert.equal(
   returned.every((row) => !row.offline),
   true,
 );
+// Summary exports follow project ticks and search, including Unknown project.
+await page.locator("label.project").last().locator("input").check();
+await page
+  .getByPlaceholder("Search filenames, projects, codecs, paths…")
+  .fill("clip3");
+await page.locator(".export-menu summary").click();
+await page.locator(".summary-exports button").first().click();
+await page.waitForFunction(() =>
+  window.calls.some((c) => c.cmd === "export_report"),
+);
+const exported = await page.evaluate(
+  () =>
+    window.calls.filter((c) => c.cmd === "export_report").at(-1).args.content,
+);
+assert.ok(exported.includes("Unknown project"));
+assert.ok(!exported.includes("Moon Orchard"));
+await page
+  .getByPlaceholder("Search filenames, projects, codecs, paths…")
+  .fill("");
+await page.getByRole("button", { name: /^All projects/ }).click();
+await page.locator(".export-menu summary").click();
 // All-project checkbox ticks all/none; the label keeps showing all.
 const allProjects = page.getByRole("checkbox", {
   name: "All projects",
@@ -201,6 +251,7 @@ assert.equal(await allProjects.evaluate((node) => node.indeterminate), true);
 await allProjects.check();
 assert.equal(await page.locator("label.project input:checked").count(), 4);
 await allProjects.uncheck();
+assert.equal(await page.locator("main tbody tr").count(), 0);
 assert.equal(await page.locator("label.project input:checked").count(), 0);
 await projectTicks.first().check();
 await page.getByRole("button", { name: /^All projects/ }).click();
@@ -285,18 +336,28 @@ assert.equal(
 while (await page.locator(".source-row input:checked").count())
   await page.locator(".source-row input:checked").first().uncheck();
 assert.equal(
+  await page
+    .getByText(
+      "Nothing selected. Tick a folder on the left to see its media.",
+      { exact: true },
+    )
+    .count(),
+  1,
+);
+assert.equal(await page.locator("label.project").count(), 0);
+assert.equal(
   await page.getByRole("button", { name: "Scan", exact: true }).isDisabled(),
   true,
 );
 await page.locator(".source-row input").nth(1).check();
-await page.locator(".source-row input").nth(4).check();
+await page.locator(".source-row input").last().check();
 await page.getByRole("button", { name: "Scan", exact: true }).click();
 const saved = await page.evaluate(
   () => window.calls.filter((c) => c.cmd === "save_settings").at(-1).args.value,
 );
 assert.deepEqual(saved.roots, [
   saved.mounted_sources[1].path,
-  saved.custom_folders[0].path,
+  saved.custom_folders[2].path,
 ]);
 assert.equal(
   await page.evaluate(

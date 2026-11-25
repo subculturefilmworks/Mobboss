@@ -364,8 +364,12 @@ impl Index {
     pub fn projects(&self) -> Result<BTreeMap<String, usize>> {
         let mut out = BTreeMap::new();
         for f in self.files(None)? {
-            *out.entry(f.metadata.project.unwrap_or_else(|| "Unknown".into()))
-                .or_default() += 1;
+            *out.entry(
+                f.metadata
+                    .project
+                    .unwrap_or_else(|| "Unknown project".into()),
+            )
+            .or_default() += 1;
         }
         Ok(out)
     }
@@ -757,7 +761,7 @@ impl Index {
                     file.metadata
                         .project
                         .clone()
-                        .unwrap_or_else(|| "Unknown".into()),
+                        .unwrap_or_else(|| "Unknown project".into()),
                 )
                 .or_default() += 1;
         }

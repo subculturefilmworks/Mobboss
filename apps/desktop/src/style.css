@@ -1310,3 +1310,31 @@ aside {
   background: transparent;
   color: inherit;
 }
+
+.scan-modes {
+  display: flex;
+  gap: 0;
+  margin-top: 8px;
+}
+.scan-modes button {
+  flex: 1;
+  border-radius: 0;
+  padding: 5px 8px;
+}
+.scan-modes button:first-child {
+  border-radius: 5px 0 0 5px;
+}
+.scan-modes button:last-child {
+  border-radius: 0 5px 5px 0;
+}
+.scan-modes button[aria-pressed="true"] {
+  background: var(--accent);
+  color: white;
+}
+.scan-hint {
+  margin: 6px 0 12px;
+  font-size: 11px;
+}
+.empty-selection {
+  padding: 24px;
+}

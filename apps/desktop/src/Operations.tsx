@@ -140,7 +140,7 @@ export default function Operations({
         paths: selected.size
           ? [...selected]
           : files
-              .filter((f) => (f.metadata.project || "Unknown") === project)
+              .filter((f) => (f.metadata.project || "Unknown project") === project)
               .map((f) => f.path),
         destination: destination || null,
       });
@@ -186,7 +186,7 @@ export default function Operations({
   }
   const operationFiles = selected.size
     ? files.filter((f) => selected.has(f.path))
-    : files.filter((f) => (f.metadata.project || "Unknown") === project);
+    : files.filter((f) => (f.metadata.project || "Unknown project") === project);
   const needsDestination = requiresDestination(operationFiles);
   const missingDestination =
     (op !== "move" || needsDestination) && !destination.trim();

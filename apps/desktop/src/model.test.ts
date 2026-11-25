@@ -316,3 +316,34 @@ describe("clip sorting", () => {
       ]);
   });
 });
+
+it("pins Unknown project last and exports only source/project/search matches", () => {
+  const files = [
+    file("/Story/a.mxf", ""),
+    file("/Story/b.mxf", "Zinc Garden"),
+    file("/Other/c.mxf", "Hidden Island"),
+  ];
+  expect(projects(files).at(-1)?.name).toBe("Unknown project");
+  const rows = filter(
+    files.slice(0, 2).map((f) => row(f)),
+    {
+      search: "a.mxf",
+      projects: ["Unknown project"],
+      track: "",
+      codec: "",
+      folder: "",
+      diff: "",
+    },
+  );
+  const visible = rows.map((r) => r.file);
+  expect(visible).toEqual([files[0]]);
+  for (const output of [
+    summaryCsv(visible),
+    summaryHtml(visible),
+    tableCsv(rows),
+  ]) {
+    expect(output).toContain("Unknown project");
+    expect(output).not.toContain("Zinc Garden");
+    expect(output).not.toContain("Hidden Island");
+  }
+});
