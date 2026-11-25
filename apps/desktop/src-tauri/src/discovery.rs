@@ -154,7 +154,7 @@ pub fn discover(roots: Vec<PathBuf>, refresh: bool) -> Discovery {
         // Supplemental enumeration reads /Volumes itself, never its child roots.
         #[cfg(target_os = "macos")]
         {
-            Vec::new()
+            Vec::<crate::service::Volume>::new()
         }
         #[cfg(not(target_os = "macos"))]
         {
