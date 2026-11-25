@@ -29,6 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
         working-directory: apps/desktop
+      - name: Set build identity and numeric bundle version
+        run: node scripts/build-info.mjs
       - run: npm test
         working-directory: apps/desktop
       - name: Cache verified ffmpeg sources and sidecars

@@ -13,3 +13,6 @@ serde_json.workspace = true
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 ctrlc = "3"
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

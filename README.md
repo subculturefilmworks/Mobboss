@@ -205,3 +205,15 @@ The Linux libraries became available during implementation: WebKitGTK 2.52.6, GT
 Screenshots: [media table](docs/screenshots/media-table.png), [projects summary and filtered selection in light mode](docs/screenshots/projects-summary.png). Missing-file diff rows retain previously indexed metadata; PMR-only missing paths without prior metadata have unknown size/project. The diff view describes the latest completed scan in the current session.
 
 Phase 3 verification, exact test counts, native Collect/Undo evidence and current limits are recorded in [collect validation](docs/collect-validation.md).
+
+Build identity is shown at the bottom of Settings and in the app-name tooltip,
+with the same format from `mobboss --version`:
+`v0.1.0-rc13 · 2026-11-25 04:30 UTC · 02561d7`.
+Tagged CI builds use `GITHUB_REF_NAME` (stripping one leading `v`); local builds
+use the workspace Cargo version plus `-dev`. A source archive without Git shows
+`unknown` for the commit. Times are UTC build times, not installation times.
+The release workflow runs `node scripts/build-info.mjs` to share a timestamp
+between Vite and Cargo and set Tauri's bundle version to the numeric tag core
+(e.g. `v0.1.0-rc13` becomes bundle version `0.1.0`). The full prerelease tag
+remains visible in the UI/CLI; prereleases sharing a numeric core are distinguished
+there, rather than by the platform bundle version. No tags are changed.

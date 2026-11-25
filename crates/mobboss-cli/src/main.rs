@@ -4,7 +4,7 @@ use mobboss_core::{default_index, CancellationToken, Index, ScanMode, ScanOption
 use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
-    version,
+    version = env!("MOBBOSS_VERSION"),
     about = "Mob Boss — Avid media inventory and verified collection"
 )]
 struct Args {
@@ -91,7 +91,18 @@ enum Command {
         path: PathBuf,
     },
 }
+#[cfg(test)]
+mod build_version;
+
 fn main() -> Result<()> {
+    if std::env::args_os().len() == 2
+        && std::env::args_os()
+            .nth(1)
+            .is_some_and(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("{}", env!("MOBBOSS_VERSION"));
+        return Ok(());
+    }
     let args = Args::parse();
     if let Command::Collect(a) = &args.command {
         anyhow::ensure!(a.dest.is_some(), "Move & Backup (collect) requires --dest");

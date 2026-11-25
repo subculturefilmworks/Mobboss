@@ -9,7 +9,7 @@
     "test": "vitest run",
     "tauri": "tauri",
     "format": "prettier --write src vite.config.ts",
-    "test:ui": "node tests/sources-rail.mjs"
+    "test:ui": "node tests/sources-rail.mjs && node tests/player.mjs"
   },
   "dependencies": {
     "@tanstack/react-table": "^8.21.3",

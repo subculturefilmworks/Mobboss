@@ -905,7 +905,10 @@ progress {
   width: min(1000px, 95vw);
   max-width: 1000px;
   max-height: 95vh;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
 }
 .player-title {
   display: flex;
@@ -916,9 +919,28 @@ progress {
 }
 .player-title h2 {
   margin: 0 0 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .player-title small {
   color: var(--muted);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.player-heading {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.player-title > button {
+  flex: none;
+  align-self: flex-start;
+  margin-left: auto;
 }
 .preview-player video {
   width: 100%;
@@ -997,10 +1019,12 @@ progress {
   margin-top: 12px;
 }
 .player-transport input {
+  min-width: 0;
   flex: 1;
   padding: 0;
 }
 .player-transport output {
+  flex: none;
   font-variant-numeric: tabular-nums;
   font-family: monospace;
   font-size: 16px;
@@ -1023,6 +1047,9 @@ progress {
   align-items: center;
   margin-top: 16px;
   font-size: 12px;
+}
+.proxy-progress > div {
+  min-width: 0;
 }
 .proxy-progress progress {
   flex: 1;
@@ -1337,4 +1364,9 @@ aside {
 }
 .empty-selection {
   padding: 24px;
+}
+
+.build-version {
+  margin-bottom: 0;
+  font-size: 11px;
 }

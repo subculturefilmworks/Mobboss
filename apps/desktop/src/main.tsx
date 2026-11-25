@@ -1,3 +1,4 @@
+import { buildVersion } from "./version";
 import SourcePath from "./SourcePath";
 import SoloFolder from "./SoloFolder";
 import {
@@ -389,7 +390,7 @@ function App() {
       <header>
         <div className="brand-icon">M</div>
         <div className="brand">
-          <h1>Mob Boss</h1>
+          <h1 title={buildVersion}>Mob Boss</h1>
           <p>Media management for Avid Media Composer</p>
         </div>
         <div className="header-actions">
@@ -1016,6 +1017,7 @@ function App() {
                 Save settings
               </button>
             </div>
+            <p className="hint build-version">{buildVersion}</p>
           </section>
         </div>
       )}

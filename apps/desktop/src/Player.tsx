@@ -188,8 +188,10 @@ export default function Player({
         aria-labelledby="player-title"
       >
         <div className="player-title">
-          <div>
-            <h2 id="player-title">{clip.name}</h2>
+          <div className="player-heading">
+            <h2 id="player-title" title={clip.name}>
+              {clip.name}
+            </h2>
             <small>
               {clip.tracks} · {clip.metadata.project || "Unknown"}
             </small>
@@ -198,7 +200,7 @@ export default function Player({
             )}
           </div>
           <button onClick={onClose} aria-label="Close player">
-            Close
+            ×
           </button>
         </div>
         <div className="player-media">
