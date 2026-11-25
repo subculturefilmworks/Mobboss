@@ -20,24 +20,44 @@ fn settings(state: State<AppState>) -> Reply<Settings> {
     Ok(state.settings.lock().map_err(err)?.clone())
 }
 #[tauri::command]
-fn save_settings(mut value: Settings, state: State<AppState>) -> Reply<Settings> {
-    let active = state.active.lock().map_err(err)?;
-    if active.is_some() {
-        return Err("Wait for the current scan before changing settings".into());
-    }
-    value.index = mobboss_core::validate_destination(&value.index).map_err(err)?;
-    value.roots = value
-        .roots
-        .into_iter()
-        .map(|p| mobboss_core::paths::selected(&p).unwrap_or(p))
-        .collect();
-    value.save().map_err(err)?;
-    *state.settings.lock().map_err(err)? = value.clone();
-    Ok(value)
+async fn save_settings(mut value: Settings, app: tauri::AppHandle) -> Reply<Settings> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let active = state.active.lock().map_err(err)?;
+        if active.is_some() {
+            return Err("Wait for the current scan before changing settings".into());
+        }
+        value.index = mobboss_core::validate_destination(&value.index).map_err(err)?;
+        value.roots = value
+            .roots
+            .into_iter()
+            .map(|p| {
+                let path = p.clone();
+                crate::discovery::bounded(format!("selected:{}", path.display()), move || {
+                    mobboss_core::paths::selected(&path)
+                })
+                .and_then(Result::ok)
+                .unwrap_or(p)
+            })
+            .collect();
+        value.save().map_err(err)?;
+        *state.settings.lock().map_err(err)? = value.clone();
+        Ok(value)
+    })
+    .await
+    .map_err(err)?
 }
 #[tauri::command]
-fn files(state: State<AppState>) -> Reply<Vec<mobboss_core::MediaFile>> {
-    service::files(&*state.settings.lock().map_err(err)?).map_err(err)
+async fn files(app: tauri::AppHandle) -> Reply<Vec<mobboss_core::MediaFile>> {
+    let settings = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .map_err(err)?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || service::files(&settings).map_err(err))
+        .await
+        .map_err(err)?
 }
 #[tauri::command]
 fn missing_files(
@@ -47,8 +67,16 @@ fn missing_files(
     service::missing_files(&*state.settings.lock().map_err(err)?, &paths).map_err(err)
 }
 #[tauri::command]
-fn volumes() -> Vec<service::Volume> {
-    service::volumes()
+async fn discover_sources(app: tauri::AppHandle) -> Reply<crate::discovery::Discovery> {
+    let settings = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .map_err(err)?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || crate::discovery::discover(settings.roots))
+        .await
+        .map_err(err)
 }
 #[tauri::command]
 fn cancel(state: State<AppState>) -> Reply<()> {
@@ -285,7 +313,7 @@ pub fn run() {
             save_settings,
             files,
             missing_files,
-            volumes,
+            discover_sources,
             start_scan,
             plan_operation,
             plan_undo,

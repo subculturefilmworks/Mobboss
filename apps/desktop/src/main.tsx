@@ -1,3 +1,9 @@
+import {
+  availableSources,
+  type FoundSource,
+  sameSource,
+  type Discovery,
+} from "./sources";
 import React, {
   useCallback,
   useEffect,
@@ -25,7 +31,6 @@ import {
   totalSize,
   type MediaFile,
   type Settings,
-  type Volume,
   type Progress,
   type Report,
   type Filters,
@@ -56,7 +61,9 @@ function App() {
     roots: [],
     concurrency: 8,
   });
-  const [volumes, setVolumes] = useState<Volume[]>([]);
+  const [found, setFound] = useState<FoundSource[]>([]);
+  const [online, setOnline] = useState<string[] | null>(null);
+  const discovering = useRef(false);
   const [view, setView] = useStored("mobboss.view", "files");
   const [clipSort, setClipSort] = useStored<ClipSort>("mobboss.clip-sort", {
     key: "name",
@@ -154,15 +161,13 @@ function App() {
           },
         ),
       );
-      const [s, f, v] = await Promise.all([
+      const [s, f] = await Promise.all([
         invoke<Settings>("settings"),
         invoke<MediaFile[]>("files"),
-        invoke<Volume[]>("volumes"),
       ]);
       if (!disposed) {
         setSettings(s);
         setFiles(f);
-        setVolumes(v);
         setReady(true);
       }
     })().catch((e) => setNotice(String(e)));
@@ -172,6 +177,37 @@ function App() {
       unlisten.forEach((fn) => fn());
     };
   }, []);
+  useEffect(() => {
+    if (!desktop || !ready) return;
+    let disposed = false;
+    const check = async () => {
+      if (discovering.current) return;
+      discovering.current = true;
+      try {
+        const result = await invoke<Discovery>("discover_sources");
+        if (!disposed) {
+          setFound(result.found);
+          setOnline(result.online);
+        }
+      } catch (e) {
+        if (!disposed) setNotice(String(e));
+      } finally {
+        discovering.current = false;
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5000);
+    window.addEventListener("focus", check);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", check);
+    };
+  }, [ready, settings.roots]);
+  const available = useMemo(
+    () => availableSources(found, settings.roots),
+    [found, settings.roots],
+  );
   const rows = useMemo(
     () => diffRows(files, reports, archived),
     [files, reports, archived],
@@ -307,7 +343,6 @@ function App() {
           <h1>Mob Boss</h1>
           <p>Media management for Avid Media Composer</p>
         </div>
-        <span className="readonly">● PLAN FIRST</span>
         <div className="header-actions">
           <Operations
             disabled={!ready || busy}
@@ -331,10 +366,12 @@ function App() {
           </div>
           <button
             className="primary scan-button"
+            title="Add folder"
+            aria-label="Add folder"
             disabled={!ready || busy}
             onClick={() => run(pick)}
           >
-            ＋ Scan…
+            Add folder
           </button>
           <div className="scan-options">
             <label htmlFor="mode">Scan mode</label>
@@ -365,6 +402,9 @@ function App() {
                   onClick={() => setFilter("folder", root)}
                 >
                   ▱ {root.split(/[\\/]/).pop() || root}
+                  {online && !online.some((p) => sameSource(p, root)) && (
+                    <small>offline</small>
+                  )}
                 </button>
                 <button
                   aria-label={`Remove source ${root}`}
@@ -373,7 +413,9 @@ function App() {
                     run(() =>
                       persist({
                         ...settings,
-                        roots: settings.roots.filter((r) => r !== root),
+                        roots: settings.roots.filter(
+                          (r) => !sameSource(r, root),
+                        ),
                       }),
                     )
                   }
@@ -393,29 +435,32 @@ function App() {
             </button>
           )}
           <details className="volumes" open>
-            <summary>Mounted volumes & shares</summary>
-            {volumes.map((v) => (
-              <button
-                className="volume"
-                title={v.path}
-                key={v.path}
-                disabled={busy}
-                onClick={() =>
-                  run(() => scan([...new Set([...settings.roots, v.path])]))
-                }
-              >
-                <span>▱ {v.name || v.path}</span>
+            <summary>Avid media found</summary>
+            {available.map((source) => (
+              <div className="found-source" key={source.path}>
+                <strong>▱ {source.volume}</strong>
+                <span className="found-path" title={source.path}>
+                  {source.path}
+                </span>
                 <small>
-                  <span title={`${v.available} bytes`}>
-                    {bytes(v.available)}
-                  </span>{" "}
-                  free
+                  {source.total > 0
+                    ? `${bytes(source.available)} free of ${bytes(source.total)}`
+                    : "Capacity unavailable"}
                 </small>
-              </button>
+                <button
+                  disabled={busy}
+                  aria-label={`Add ${source.path}`}
+                  onClick={() =>
+                    run(() => scan([...settings.roots, source.path]))
+                  }
+                >
+                  Add
+                </button>
+              </div>
             ))}
-            {!volumes.length && (
+            {!available.length && (
               <p className="hint">
-                Mounted local and network volumes appear here.
+                No additional Avid media folders found on connected drives.
               </p>
             )}
           </details>
@@ -826,7 +871,7 @@ function App() {
             </label>
             <p className="hint">
               8 is the default. Mounted shares must be connected in Finder or
-              Explorer to appear in Sources.
+              Explorer for their media folders to appear under Avid media found.
             </p>
             <p className="hint">
               Playback stays in memory and is discarded when the app quits.

@@ -1,4 +1,5 @@
 //! Desktop services, usable and testable without a webview.
+pub mod discovery;
 pub mod service;
 #[cfg(feature = "desktop")]
 mod shell;
