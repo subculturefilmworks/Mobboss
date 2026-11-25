@@ -39,7 +39,7 @@ await page.addInitScript(() => {
     ],
     custom_folders: [
       make("/Volumes/Project-Island/Project Directory/Backup files/MXF/1"),
-      make("/Volumes/Project-Island/Selected Media", false),
+      make("/Volumes/Story-Island/Avid MediaFiles/MXF/1/Nested", false),
     ],
   };
   const attached = structuredClone(window.testSettings.mounted_sources);
@@ -61,7 +61,7 @@ await page.addInitScript(() => {
       if (cmd === "files")
         return ["Moon Orchard", "Paper Harbor", "Amber Transit", ""].map(
           (project, i) => ({
-            path: `/Volumes/Story-Island/Avid MediaFiles/MXF/1/clip${i}.mxf`,
+            path: `/Volumes/Story-Island/Avid MediaFiles/MXF/1/${i === 0 ? "Nested/" : ""}clip${i}.mxf`,
             folder: "/Volumes/Story-Island/Avid MediaFiles/MXF/1",
             size: 1234567890 * (i + 1),
             modified_ns: "0",
@@ -162,6 +162,105 @@ assert.equal(
 await page.getByRole("button", { name: "Settings", exact: true }).click();
 assert.equal(await page.locator(".modal [aria-label='Scan mode']").count(), 0);
 await page.getByRole("button", { name: "Close", exact: true }).click();
+// Solo options mirror online ticks in rail order, retaining nested rows.
+const solo = page.getByRole("combobox", { name: "Solo folder", exact: true });
+async function assertSoloOptions() {
+  const expected = await page.evaluate(() =>
+    [
+      ...window.testSettings.mounted_sources,
+      ...window.testSettings.custom_folders,
+    ]
+      .filter((row) => row.checked && !row.offline)
+      .map((row) => row.path),
+  );
+  assert.deepEqual(
+    await solo
+      .locator("option")
+      .evaluateAll((nodes) => nodes.slice(1).map((n) => n.value)),
+    expected,
+  );
+  assert.deepEqual(
+    await solo
+      .locator("option")
+      .evaluateAll((nodes) => nodes.slice(1).map((n) => n.title)),
+    expected,
+  );
+}
+await assertSoloOptions();
+assert.equal(
+  await solo.locator("option").first().innerText(),
+  "All ticked folders",
+);
+const nestedTick = page
+  .locator('[data-source-kind="custom_folders"] input')
+  .last();
+await nestedTick.check();
+await assertSoloOptions();
+const nestedPath = "/Volumes/Story-Island/Avid MediaFiles/MXF/1/Nested";
+const ticksBefore = await page
+  .locator(".source-row input")
+  .evaluateAll((nodes) => nodes.map((n) => n.checked));
+await solo.selectOption(nestedPath);
+assert.equal(await page.locator("label.project").count(), 1);
+assert.ok(
+  (await page.locator("label.project").innerText()).includes("Moon Orchard"),
+);
+assert.ok(
+  (await page.locator(".projects-label").innerText()).includes("1 projects"),
+);
+assert.ok(
+  (await page.locator(".projects-label").innerText()).includes("1.23 GB"),
+);
+assert.equal(
+  await page.locator("footer > span").first().locator("b").innerText(),
+  "1",
+);
+assert.equal(
+  await page
+    .locator("footer > span")
+    .first()
+    .locator("span")
+    .getAttribute("title"),
+  "1234567890 bytes",
+);
+assert.deepEqual(
+  await page
+    .locator(".source-row input")
+    .evaluateAll((nodes) => nodes.map((n) => n.checked)),
+  ticksBefore,
+);
+await page.locator(".export-menu summary").click();
+for (const button of await page.locator(".summary-exports button").all()) {
+  await button.click();
+  await page.waitForTimeout(50);
+  const content = await page.evaluate(
+    () =>
+      window.calls.filter((c) => c.cmd === "export_report").at(-1).args.content,
+  );
+  assert.ok(content.includes("Moon Orchard"));
+  assert.ok(!content.includes("Paper Harbor"));
+}
+await page.locator(".export-menu summary").click();
+await page
+  .getByRole("button", { name: "Export filtered CSV ↗", exact: true })
+  .click();
+await page.waitForTimeout(50);
+const clipExport = await page.evaluate(
+  () =>
+    window.calls.filter((c) => c.cmd === "export_report").at(-1).args.content,
+);
+assert.ok(clipExport.includes("Moon Orchard"));
+assert.ok(!clipExport.includes("Paper Harbor"));
+await nestedTick.uncheck();
+assert.equal(await solo.inputValue(), "");
+assert.equal(await page.locator("label.project").count(), 4);
+await nestedTick.check();
+assert.equal(await solo.inputValue(), ""); // Reticking does not restore an old solo.
+await nestedTick.uncheck();
+await solo.selectOption(
+  "/Volumes/Project-Island/Project Directory/Backup files/MXF/1",
+);
+assert.equal(await page.locator("label.project").count(), 0);
 // Discovery is explicit, keeps existing checks, and never scans.
 await page
   .getByRole("button", { name: "Search for databases", exact: true })
@@ -169,6 +268,8 @@ await page
 await page.waitForFunction(
   () => window.testSettings.mounted_sources.length === 2,
 );
+assert.equal(await solo.inputValue(), ""); // Search marked the soloed custom folder offline.
+await assertSoloOptions();
 const merged = await page.evaluate(() => window.testSettings.mounted_sources);
 assert.equal(merged[0].checked, true);
 assert.equal(merged[1].checked, true);
@@ -221,8 +322,8 @@ await page
   .fill("clip3");
 await page.locator(".export-menu summary").click();
 await page.locator(".summary-exports button").first().click();
-await page.waitForFunction(() =>
-  window.calls.some((c) => c.cmd === "export_report"),
+await page.waitForFunction(
+  () => window.calls.filter((c) => c.cmd === "export_report").length >= 4,
 );
 const exported = await page.evaluate(
   () =>
@@ -292,7 +393,8 @@ for (const width of [1280, 1024]) {
     if (style.title.includes("/MXF/"))
       assert.ok(
         style.text.endsWith(
-          style.title.slice(style.title.lastIndexOf("/MXF/")),
+          style.title.match(/[/]MXF[/][^/]+$/i)?.[0] ||
+            style.title.slice(style.title.lastIndexOf("/")),
         ),
       );
   }

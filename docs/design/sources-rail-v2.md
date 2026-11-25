@@ -45,3 +45,11 @@ The regression browser suite also verifies tick/untick/retick without scanning,
 Unknown project ordering, project/search-scoped summary export, empty project
 selection, the rail scan control, and the no-folder hint. Unit tests cover path
 boundaries, Windows aliases, nested roots, offline exclusion and scoped exports.
+
+The Solo folder dropdown lists ticked online rail rows in rail order, including
+nested rows. Its default is All ticked folders. Soloing scopes the source union
+before Projects, totals, table filters and exports, without altering ticks.
+Unticking, removing or taking the soloed row offline resets it to all ticked
+folders. Options use the rail's measured middle-ellipsis labels with full paths
+in titles. Browser coverage verifies the option order and titles, nested-row
+solo, totals, CSV/HTML and table exports, and untick/offline reset.

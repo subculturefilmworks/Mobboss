@@ -1,4 +1,5 @@
 import SourcePath from "./SourcePath";
+import SoloFolder from "./SoloFolder";
 import {
   mergeSources,
   rememberMounted,
@@ -205,7 +206,22 @@ function App() {
     }
   }
   const roots = useMemo(() => checkedSources(settings), [settings]);
-  const scopedFiles = useMemo(() => scopeFiles(files, roots), [files, roots]);
+  const soloRows = useMemo(
+    () =>
+      [...settings.mounted_sources, ...settings.custom_folders].filter(
+        (row) => row.checked && !row.offline,
+      ),
+    [settings],
+  );
+  const solo =
+    soloRows.find((row) => sameSource(row.path, filters.folder))?.path || "";
+  useEffect(() => {
+    if (filters.folder && !solo) setFilters((old) => ({ ...old, folder: "" }));
+  }, [filters.folder, solo]);
+  const scopedFiles = useMemo(
+    () => scopeFiles(files, solo ? [solo] : roots),
+    [files, roots, solo],
+  );
   const [projectScope, setProjectScope] = useState(false);
   const rows = useMemo(() => {
     const indexed = new Set(scopedFiles.map((f) => f.path));
@@ -221,7 +237,7 @@ function App() {
             filters.diff
               ? rows
               : rows.filter((r) => r.values.diff !== "missing"),
-            filters,
+            { ...filters, folder: "" },
           ),
     [rows, filters, projectScope],
   );
@@ -368,7 +384,6 @@ function App() {
   const tracks = [
     ...new Set(scopedFiles.map((f) => f.metadata.track_kind).filter(Boolean)),
   ].sort() as string[];
-  const folders = [...new Set(scopedFiles.map((f) => f.folder))].sort();
   return (
     <div className="app">
       <header>
@@ -705,16 +720,11 @@ function App() {
                 <option key={c}>{c}</option>
               ))}
             </select>
-            <select
-              aria-label="Folder or volume filter"
-              value={filters.folder}
-              onChange={(e) => setFilter("folder", e.target.value)}
-            >
-              <option value="">All folders / volumes</option>
-              {[...new Set([...settings.roots, ...folders])].map((f) => (
-                <option key={f}>{f}</option>
-              ))}
-            </select>
+            <SoloFolder
+              rows={soloRows}
+              value={solo}
+              onChange={(path) => setFilter("folder", path)}
+            />
             <button onClick={() => setFilters(emptyFilters)}>
               Clear filters
             </button>
