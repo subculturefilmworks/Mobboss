@@ -62,6 +62,9 @@ function App() {
     concurrency: 8,
   });
   const [found, setFound] = useState<FoundSource[]>([]);
+  const [denied, setDenied] = useState<{ name: string; path: string }[]>([]);
+  const [discoveryRefresh, setDiscoveryRefresh] = useState(0);
+  const refreshRequested = useRef(false);
   const [online, setOnline] = useState<string[] | null>(null);
   const discovering = useRef(false);
   const [view, setView] = useStored("mobboss.view", "files");
@@ -184,10 +187,14 @@ function App() {
       if (discovering.current) return;
       discovering.current = true;
       try {
-        const result = await invoke<Discovery>("discover_sources");
+        const result = await invoke<Discovery>("discover_sources", {
+          refresh: refreshRequested.current,
+        });
         if (!disposed) {
           setFound(result.found);
+          setDenied(result.denied || []);
           setOnline(result.online);
+          refreshRequested.current = false;
         }
       } catch (e) {
         if (!disposed) setNotice(String(e));
@@ -203,7 +210,7 @@ function App() {
       clearInterval(timer);
       window.removeEventListener("focus", check);
     };
-  }, [ready, settings.roots]);
+  }, [ready, settings.roots, discoveryRefresh]);
   const available = useMemo(
     () => availableSources(found, settings.roots),
     [found, settings.roots],
@@ -436,6 +443,29 @@ function App() {
           )}
           <details className="volumes" open>
             <summary>Avid media found</summary>
+            <button
+              disabled={!ready || busy}
+              onClick={() => {
+                refreshRequested.current = true;
+                setDiscoveryRefresh((n) => n + 1);
+              }}
+            >
+              Refresh
+            </button>
+            {denied.map((volume) => (
+              <div className="found-source" key={volume.path}>
+                <strong>{volume.name} · Permission needed</strong>
+                <p className="hint">
+                  Mob Boss doesn't have access to {volume.name}. Allow it in
+                  System Settings › Privacy &amp; Security › Files and Folders.
+                </p>
+                <button
+                  onClick={() => run(() => invoke("open_volume_permissions"))}
+                >
+                  Open System Settings
+                </button>
+              </div>
+            ))}
             {available.map((source) => (
               <div className="found-source" key={source.path}>
                 <strong>▱ {source.volume}</strong>
@@ -458,7 +488,7 @@ function App() {
                 </button>
               </div>
             ))}
-            {!available.length && (
+            {!available.length && !denied.length && (
               <p className="hint">
                 No additional Avid media folders found on connected drives.
               </p>

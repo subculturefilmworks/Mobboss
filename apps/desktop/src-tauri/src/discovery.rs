@@ -3,7 +3,7 @@
 use crate::service::Volume;
 use serde::Serialize;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{mpsc, Mutex, OnceLock},
@@ -45,15 +45,24 @@ pub fn bounded<T: Send + 'static>(
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FoundSource {
+    #[serde(skip)]
+    mount: PathBuf,
     #[serde(serialize_with = "mobboss_core::paths::serialize")]
     pub path: PathBuf,
     pub volume: String,
     pub available: u64,
     pub total: u64,
 }
+#[derive(Clone, Debug, Serialize)]
+pub struct DeniedVolume {
+    pub name: String,
+    #[serde(serialize_with = "mobboss_core::paths::serialize")]
+    pub path: PathBuf,
+}
 #[derive(Default, Serialize)]
 pub struct Discovery {
     pub found: Vec<FoundSource>,
+    pub denied: Vec<DeniedVolume>,
     #[serde(serialize_with = "mobboss_core::paths::serialize_many")]
     pub online: Vec<PathBuf>,
 }
@@ -86,35 +95,128 @@ pub fn readable_root(path: &Path) -> bool {
         .is_ok()
 }
 
-pub fn discover(roots: Vec<PathBuf>) -> Discovery {
+#[derive(Default)]
+pub struct VolumeCache {
+    results: HashMap<PathBuf, Discovery>,
+}
+impl VolumeCache {
+    fn check(
+        &mut self,
+        volumes: Vec<Volume>,
+        refresh: bool,
+        check: fn(&Path) -> std::io::Result<Vec<PathBuf>>,
+    ) -> Discovery {
+        self.results
+            .retain(|path, _| volumes.iter().any(|v| &v.path == path));
+        let new: Vec<_> = volumes
+            .into_iter()
+            .filter(|v| refresh || !self.results.contains_key(&v.path))
+            .collect();
+        // Probe concurrently under one deadline, including empty/denied/timed-out results.
+        let result = probe(new.clone(), vec![], TIMEOUT, check);
+        for volume in new {
+            self.results.insert(
+                volume.path.clone(),
+                Discovery {
+                    found: result
+                        .found
+                        .iter()
+                        .filter(|s| s.mount == volume.path)
+                        .cloned()
+                        .collect(),
+                    denied: result
+                        .denied
+                        .iter()
+                        .filter(|v| v.path == volume.path)
+                        .cloned()
+                        .collect(),
+                    online: vec![],
+                },
+            );
+        }
+        let mut result = Discovery::default();
+        for cached in self.results.values() {
+            result.found.extend(cached.found.clone());
+            result.denied.extend(cached.denied.clone());
+        }
+        result.found.sort_by(|a, b| a.path.cmp(&b.path));
+        result.denied.sort_by(|a, b| a.path.cmp(&b.path));
+        result
+    }
+}
+
+pub fn discover(roots: Vec<PathBuf>, refresh: bool) -> Discovery {
+    static CACHE: OnceLock<Mutex<VolumeCache>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     // Disk enumeration itself can call a network filesystem. Bound it as well.
-    let disks = start("volume-enumeration".into(), crate::service::volumes);
+    let disks = start("volume-enumeration".into(), || {
+        // On macOS list mount points without sysinfo's per-disk capacity refresh.
+        // Supplemental enumeration reads /Volumes itself, never its child roots.
+        #[cfg(target_os = "macos")]
+        {
+            Vec::new()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            crate::service::volumes()
+        }
+    });
     let extra = start(
         "supplemental-volumes".into(),
         crate::service::supplemental_volumes,
     );
     let deadline = Instant::now() + TIMEOUT;
-    let mut volumes = disks
-        .and_then(|rx| {
-            rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .ok()
+    let disks = disks.and_then(|rx| {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()
+    });
+    let extra = extra.and_then(|rx| {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()
+    });
+    // An incomplete enumeration is not evidence of an unmount.
+    let mut result = if let (Some(mut volumes), Some(extra)) = (disks, extra) {
+        for v in extra {
+            if !volumes
+                .iter()
+                .any(|existing| mobboss_core::paths::same(&existing.path, &v.path))
+            {
+                volumes.push(v);
+            }
+        }
+        cache.check(volumes, refresh, media_at_root)
+    } else {
+        let mut result = Discovery::default();
+        for cached in cache.results.values() {
+            result.found.extend(cached.found.clone());
+            result.denied.extend(cached.denied.clone());
+        }
+        result
+    };
+    // Existing selected sources retain their bounded availability checks, but
+    // never retry a root belonging to a permission-denied volume.
+    let selected_roots = roots.clone();
+    let roots = roots
+        .into_iter()
+        .filter(|p| {
+            !cache
+                .results
+                .keys()
+                .any(|mount| mobboss_core::paths::same(mount, p))
+                && !result.denied.iter().any(|v| p.starts_with(&v.path))
         })
-        .unwrap_or_default();
-    for v in extra
-        .and_then(|rx| {
-            rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .ok()
-        })
-        .unwrap_or_default()
-    {
-        if !volumes
+        .collect();
+    result.online = probe(vec![], roots, TIMEOUT, media_at_root).online;
+    for source in &result.found {
+        if !selected_roots
             .iter()
-            .any(|existing| mobboss_core::paths::same(&existing.path, &v.path))
+            .any(|p| mobboss_core::paths::same(p, &source.path))
+            && !result.online.contains(&source.path)
         {
-            volumes.push(v);
+            result.online.push(source.path.clone());
         }
     }
-    probe(volumes, roots, TIMEOUT, media_at_root)
+    result
 }
 fn probe(
     volumes: Vec<Volume>,
@@ -160,13 +262,25 @@ fn probe(
         })
         .collect();
     let mut found = vec![];
+    let mut denied = vec![];
     for (v, rx) in requests {
-        if let Some(Ok((paths, available, total))) = rx.and_then(|rx| {
+        let response = rx.and_then(|rx| {
             rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .ok()
-        }) {
+        });
+        if response
+            .as_ref()
+            .is_some_and(|r| r.as_ref().is_err_and(permission_denied))
+        {
+            denied.push(DeniedVolume {
+                name: v.name.clone(),
+                path: v.path.clone(),
+            });
+        }
+        if let Some(Ok((paths, available, total))) = response {
             found.extend(paths.into_iter().map(|path| FoundSource {
                 path,
+                mount: v.path.clone(),
                 volume: v.name.clone(),
                 available,
                 total,
@@ -192,7 +306,16 @@ fn probe(
             online.push(source.path.clone());
         }
     }
-    Discovery { found, online }
+    Discovery {
+        found,
+        online,
+        denied,
+    }
+}
+
+fn permission_denied(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || cfg!(unix) && matches!(error.raw_os_error(), Some(1 | 13))
 }
 
 #[cfg(test)]
@@ -204,6 +327,62 @@ mod tests {
             path,
             available: 0,
             total: 0,
+        }
+    }
+    #[test]
+    fn caches_each_mount_until_refresh_or_unmount() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn check(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![path.join("Avid MediaFiles")])
+        }
+        let volume = || {
+            let mut v = fake_volume("Cache-Island".into());
+            v.total = 100;
+            v
+        };
+        let mut cache = VolumeCache::default();
+        assert_eq!(cache.check(vec![volume()], false, check).found.len(), 1);
+        for _ in 0..3 {
+            assert_eq!(cache.check(vec![volume()], false, check).found.len(), 1);
+        }
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        cache.check(
+            vec![volume(), fake_volume("Cache-Meadow".into())],
+            false,
+            check,
+        );
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        cache.check(vec![volume()], true, check);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+        assert!(cache.check(vec![], false, check).found.is_empty());
+        cache.check(vec![volume()], false, check);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+    }
+    #[test]
+    fn denied_mount_is_not_retried_until_refresh() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn denied(_: &Path) -> std::io::Result<Vec<PathBuf>> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "fake denial",
+            ))
+        }
+        let mut cache = VolumeCache::default();
+        for _ in 0..4 {
+            let result = cache.check(vec![fake_volume("Denied-Island".into())], false, denied);
+            assert_eq!(result.denied.len(), 1);
+            assert!(result.found.is_empty());
+        }
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        cache.check(vec![fake_volume("Denied-Island".into())], true, denied);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        #[cfg(unix)]
+        for code in [1, 13] {
+            assert!(permission_denied(&std::io::Error::from_raw_os_error(code)));
         }
     }
     #[test]

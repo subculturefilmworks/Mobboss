@@ -58,10 +58,19 @@ jobs:
           # Includes all unit/integration/doc tests, planners, transfers and codec gates.
           cargo test -p mobboss-core --all-targets -- --nocapture
           cargo test -p mobboss-core --doc
-      - name: Build unsigned universal Mac app and disk image
+      - name: Build ad-hoc signed universal Mac app and disk image
         if: runner.os == 'macOS'
         run: npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
         working-directory: apps/desktop
+      - name: Verify Mac app and bundled ffmpeg signatures
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app='target/universal-apple-darwin/release/bundle/macos/Mob Boss.app'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=2 "$app"
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/ffmpeg"
+          codesign -dv --verbose=2 "$app/Contents/MacOS/ffmpeg"
       - name: Build portable Windows executable
         if: runner.os == 'Windows'
         run: npm run tauri -- build --target x86_64-pc-windows-msvc --no-bundle
@@ -99,7 +108,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'
         with:
-          name: MobBoss-macOS-universal-unsigned
+          name: MobBoss-macOS-universal-adhoc
           path: |
             target/MobBoss-macOS-universal.app.zip
             target/universal-apple-darwin/release/bundle/dmg/*.dmg

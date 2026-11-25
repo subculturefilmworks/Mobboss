@@ -44,7 +44,8 @@
     ],
     "license": "MIT OR Apache-2.0",
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
     },
     "resources": {
       "../../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",

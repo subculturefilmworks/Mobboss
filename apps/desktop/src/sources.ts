@@ -6,6 +6,7 @@ export interface FoundSource {
 }
 export interface Discovery {
   found: FoundSource[];
+  denied: { name: string; path: string }[];
   online: string[];
 }
 // Match the backend path comparison, including Windows extended/UNC spelling.

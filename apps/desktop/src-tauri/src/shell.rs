@@ -67,16 +67,35 @@ fn missing_files(
     service::missing_files(&*state.settings.lock().map_err(err)?, &paths).map_err(err)
 }
 #[tauri::command]
-async fn discover_sources(app: tauri::AppHandle) -> Reply<crate::discovery::Discovery> {
+async fn discover_sources(
+    app: tauri::AppHandle,
+    refresh: Option<bool>,
+) -> Reply<crate::discovery::Discovery> {
     let settings = app
         .state::<AppState>()
         .settings
         .lock()
         .map_err(err)?
         .clone();
-    tauri::async_runtime::spawn_blocking(move || crate::discovery::discover(settings.roots))
-        .await
-        .map_err(err)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::discovery::discover(settings.roots, refresh.unwrap_or(false))
+    })
+    .await
+    .map_err(err)
+}
+#[tauri::command]
+fn open_volume_permissions() -> Reply<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")
+            .status()
+            .map_err(err)?;
+        if !status.success() {
+            return Err("System Settings could not be opened".into());
+        }
+    }
+    Ok(())
 }
 #[tauri::command]
 fn cancel(state: State<AppState>) -> Reply<()> {
@@ -314,6 +333,7 @@ pub fn run() {
             files,
             missing_files,
             discover_sources,
+            open_volume_permissions,
             start_scan,
             plan_operation,
             plan_undo,
