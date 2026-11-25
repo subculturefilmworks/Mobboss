@@ -29,16 +29,10 @@ async fn save_settings(mut value: Settings, app: tauri::AppHandle) -> Reply<Sett
         }
         value.index = mobboss_core::validate_destination(&value.index).map_err(err)?;
         value.roots = value
-            .roots
-            .into_iter()
-            .map(|p| {
-                let path = p.clone();
-                crate::discovery::bounded(format!("selected:{}", path.display()), move || {
-                    mobboss_core::paths::selected(&path)
-                })
-                .and_then(Result::ok)
-                .unwrap_or(p)
-            })
+            .mounted_sources
+            .iter()
+            .chain(&value.custom_folders)
+            .map(|row| row.path.clone())
             .collect();
         value.save().map_err(err)?;
         *state.settings.lock().map_err(err)? = value.clone();
@@ -112,7 +106,8 @@ fn start_scan(mode: ScanMode, app: tauri::AppHandle, state: State<AppState>) -> 
     }
     crate::preview::cancel_thumbnails(state.clone())?;
     state.streams.stop(None);
-    let settings = state.settings.lock().map_err(err)?.clone();
+    let mut settings = state.settings.lock().map_err(err)?.clone();
+    settings.roots = settings.checked_roots();
     let token = CancellationToken::default();
     *active = Some(token.clone());
     std::thread::spawn(move || {

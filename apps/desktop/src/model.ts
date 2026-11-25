@@ -71,6 +71,8 @@ export interface Settings {
   index: string;
   roots: string[];
   concurrency: number;
+  mounted_sources: import("./sources").SourceRow[];
+  custom_folders: import("./sources").SourceRow[];
 }
 export interface Volume {
   name: string;

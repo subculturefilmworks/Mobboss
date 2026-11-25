@@ -78,9 +78,26 @@ pub fn media_at_root(root: &Path) -> std::io::Result<Vec<PathBuf>> {
             || name.eq_ignore_ascii_case("OMFI MediaFiles"))
             && entry.path().is_dir()
         {
-            found.push(
-                mobboss_core::paths::selected(&entry.path()).unwrap_or_else(|_| entry.path()),
-            );
+            if name.eq_ignore_ascii_case("OMFI MediaFiles") {
+                found.push(entry.path());
+            } else {
+                for mxf in fs::read_dir(entry.path())? {
+                    let mxf = mxf?;
+                    if mxf
+                        .file_name()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("MXF")
+                        && mxf.file_type()?.is_dir()
+                    {
+                        for folder in fs::read_dir(mxf.path())? {
+                            let folder = folder?;
+                            if folder.file_type()?.is_dir() {
+                                found.push(folder.path());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     found.sort();
@@ -390,19 +407,24 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mobboss-discovery-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let root = mobboss_core::paths::canonical(&root).unwrap();
-        fs::create_dir_all(root.join("Avid MediaFiles")).unwrap();
+        fs::create_dir_all(root.join("Avid MediaFiles/MXF/1/deeper")).unwrap();
+        fs::create_dir_all(root.join("Avid MediaFiles/MXF/desktop.1")).unwrap();
         fs::create_dir_all(root.join("OMFI MediaFiles")).unwrap();
         fs::create_dir_all(root.join("nested/Avid MediaFiles")).unwrap();
         fs::create_dir_all(root.join("Avid Media Files")).unwrap();
         let found = media_at_root(&root).unwrap();
         assert_eq!(
             found,
-            vec![root.join("Avid MediaFiles"), root.join("OMFI MediaFiles")]
+            vec![
+                root.join("Avid MediaFiles/MXF/1"),
+                root.join("Avid MediaFiles/MXF/desktop.1"),
+                root.join("OMFI MediaFiles")
+            ]
         );
         fs::rename(root.join("Avid MediaFiles"), root.join("avid mediafiles")).unwrap();
         assert!(media_at_root(&root)
             .unwrap()
-            .contains(&root.join("avid mediafiles")));
+            .contains(&root.join("avid mediafiles/MXF/1")));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

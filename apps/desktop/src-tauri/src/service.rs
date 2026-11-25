@@ -9,15 +9,67 @@ use std::{
     process::Command,
 };
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceRow {
+    #[serde(serialize_with = "mobboss_core::paths::serialize")]
+    pub path: PathBuf,
+    pub checked: bool,
+    #[serde(default)]
+    pub offline: bool,
+    #[serde(default)]
+    pub volume: String,
+}
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "SettingsData")]
 pub struct Settings {
     #[serde(serialize_with = "mobboss_core::paths::serialize")]
     pub index: PathBuf,
     #[serde(serialize_with = "mobboss_core::paths::serialize_many")]
     pub roots: Vec<PathBuf>,
     pub concurrency: usize,
+    pub mounted_sources: Vec<SourceRow>,
+    pub custom_folders: Vec<SourceRow>,
+}
+#[derive(Deserialize)]
+struct SettingsData {
+    index: PathBuf,
+    roots: Vec<PathBuf>,
+    concurrency: usize,
+    #[serde(default)]
+    mounted_sources: Vec<SourceRow>,
+    custom_folders: Option<Vec<SourceRow>>,
+}
+impl From<SettingsData> for Settings {
+    fn from(data: SettingsData) -> Self {
+        let custom_folders = data.custom_folders.unwrap_or_else(|| {
+            data.roots
+                .iter()
+                .map(|path| SourceRow {
+                    path: path.clone(),
+                    checked: true,
+                    offline: false,
+                    volume: String::new(),
+                })
+                .collect()
+        });
+        Self {
+            index: data.index,
+            roots: data.roots,
+            concurrency: data.concurrency,
+            mounted_sources: data.mounted_sources,
+            custom_folders,
+        }
+    }
 }
 impl Settings {
+    pub fn checked_roots(&self) -> Vec<PathBuf> {
+        self.mounted_sources
+            .iter()
+            .chain(&self.custom_folders)
+            .filter(|row| row.checked)
+            .map(|row| row.path.clone())
+            .collect()
+    }
     pub fn load() -> Result<Self> {
         let index = default_index()?;
         let config = index.with_file_name("settings.json");
@@ -30,6 +82,8 @@ impl Settings {
             index,
             roots: vec![],
             concurrency: 8,
+            mounted_sources: vec![],
+            custom_folders: vec![],
         })
     }
     pub fn save(&self) -> Result<()> {
@@ -285,6 +339,43 @@ pub fn reveal(path: &Path, settings: &Settings) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn only_checked_rows_are_scan_roots() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "index": "catalog.sqlite", "roots": ["/Old-Island"], "concurrency": 8,
+            "mounted_sources": [
+                {"path": "/Media-Island/MXF/1", "checked": true, "offline": true},
+                {"path": "/Media-Island/MXF/2", "checked": false}
+            ],
+            "custom_folders": [
+                {"path": "/Project-Island/Backup", "checked": false},
+                {"path": "/Project-Island/Media", "checked": true}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            settings.checked_roots(),
+            vec![
+                PathBuf::from("/Media-Island/MXF/1"),
+                PathBuf::from("/Project-Island/Media")
+            ]
+        );
+    }
+    #[test]
+    fn legacy_roots_migrate_to_checked_custom_folders() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "index": "catalog.sqlite", "roots": ["/Media-Island/MXF/1"], "concurrency": 8
+        }))
+        .unwrap();
+        assert_eq!(settings.custom_folders.len(), 1);
+        assert!(settings.custom_folders[0].checked);
+        assert_eq!(settings.custom_folders[0].path, settings.roots[0]);
+        assert!(settings.mounted_sources.is_empty());
+        let mut saved = serde_json::to_value(settings).unwrap();
+        saved["custom_folders"] = serde_json::json!([]);
+        let reloaded: Settings = serde_json::from_value(saved).unwrap();
+        assert!(reloaded.custom_folders.is_empty());
+    }
+    #[test]
     fn old_proxy_limit_is_ignored_and_never_saved_again() {
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "index": "catalog.sqlite", "roots": [], "concurrency": 8,
@@ -306,6 +397,8 @@ mod tests {
             index: dir.join("catalog.sqlite"),
             roots: vec![root.clone()],
             concurrency: 2,
+            mounted_sources: vec![],
+            custom_folders: vec![],
         };
         let options = ScanOptions {
             mode: mobboss_core::ScanMode::Quick,

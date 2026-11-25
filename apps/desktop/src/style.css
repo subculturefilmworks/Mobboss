@@ -1149,3 +1149,134 @@ progress {
 .found-source button {
   justify-self: start;
 }
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) var(--panel);
+}
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: var(--panel);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 6px;
+  border: 2px solid var(--panel);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+aside {
+  flex-basis: 310px;
+  padding: 18px 12px;
+  overflow: hidden;
+  gap: 10px;
+}
+aside > button {
+  flex-shrink: 0;
+}
+.scan-button {
+  padding: 16px;
+  font-size: 15px;
+}
+.rail-lists {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.rail-lists section {
+  margin-bottom: 18px;
+}
+.rail-lists .section-label {
+  align-items: center;
+  letter-spacing: 0.4px;
+  font-size: 11px;
+  min-height: 28px;
+}
+.section-label button {
+  padding: 4px 7px;
+  font-size: 11px;
+}
+.source-row {
+  display: flex;
+  align-items: start;
+  gap: 4px;
+  padding: 6px 0;
+  font-size: 11px;
+}
+.source-row label {
+  display: flex;
+  align-items: start;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+.source-row label span {
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.source-row input {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.source-row button {
+  padding: 0 4px;
+  background: transparent;
+  border: 0;
+  font-size: 16px;
+}
+.source-row.offline {
+  opacity: 0.5;
+}
+.source-row small {
+  color: var(--muted);
+}
+.projects-label {
+  padding-top: 12px;
+  margin-bottom: 5px;
+  letter-spacing: 0.4px;
+}
+.project {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 6px;
+}
+.project > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.project small {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.export-menu {
+  position: relative;
+  font-size: 12px;
+}
+.export-menu > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px;
+}
+.export-options {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  width: 230px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.permission-hint {
+  font-size: 11px;
+}

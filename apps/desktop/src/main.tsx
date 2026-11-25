@@ -1,6 +1,7 @@
 import {
-  availableSources,
-  type FoundSource,
+  mergeSources,
+  sourceLabel,
+  checkedSources,
   sameSource,
   type Discovery,
 } from "./sources";
@@ -60,13 +61,11 @@ function App() {
     index: "",
     roots: [],
     concurrency: 8,
+    mounted_sources: [],
+    custom_folders: [],
   });
-  const [found, setFound] = useState<FoundSource[]>([]);
   const [denied, setDenied] = useState<{ name: string; path: string }[]>([]);
-  const [discoveryRefresh, setDiscoveryRefresh] = useState(0);
-  const refreshRequested = useRef(false);
-  const [online, setOnline] = useState<string[] | null>(null);
-  const discovering = useRef(false);
+  const [searching, setSearching] = useState(false);
   const [view, setView] = useStored("mobboss.view", "files");
   const [clipSort, setClipSort] = useStored<ClipSort>("mobboss.clip-sort", {
     key: "name",
@@ -107,6 +106,8 @@ function App() {
   );
   const [includeThumbnails, setIncludeThumbnails] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsSave = useRef<Promise<unknown>>(Promise.resolve());
+  const settingsRevision = useRef(0);
   const [ready, setReady] = useState(false);
   const pending = useRef(new Map<string, MediaFile>());
   useEffect(() => {
@@ -180,41 +181,25 @@ function App() {
       unlisten.forEach((fn) => fn());
     };
   }, []);
-  useEffect(() => {
-    if (!desktop || !ready) return;
-    let disposed = false;
-    const check = async () => {
-      if (discovering.current) return;
-      discovering.current = true;
-      try {
-        const result = await invoke<Discovery>("discover_sources", {
-          refresh: refreshRequested.current,
-        });
-        if (!disposed) {
-          setFound(result.found);
-          setDenied(result.denied || []);
-          setOnline(result.online);
-          refreshRequested.current = false;
-        }
-      } catch (e) {
-        if (!disposed) setNotice(String(e));
-      } finally {
-        discovering.current = false;
-      }
-    };
-    void check();
-    const timer = window.setInterval(() => void check(), 5000);
-    window.addEventListener("focus", check);
-    return () => {
-      disposed = true;
-      clearInterval(timer);
-      window.removeEventListener("focus", check);
-    };
-  }, [ready, settings.roots, discoveryRefresh]);
-  const available = useMemo(
-    () => availableSources(found, settings.roots),
-    [found, settings.roots],
-  );
+  async function searchDatabases() {
+    setSearching(true);
+    try {
+      const result = await invoke<Discovery>("discover_sources", {
+        refresh: true,
+      });
+      setDenied(result.denied || []);
+      await persist({
+        ...settings,
+        mounted_sources: mergeSources(settings.mounted_sources, result.found),
+        custom_folders: settings.custom_folders.map((row) => ({
+          ...row,
+          offline: !result.online.some((p) => sameSource(p, row.path)),
+        })),
+      });
+    } finally {
+      setSearching(false);
+    }
+  }
   const rows = useMemo(
     () => diffRows(files, reports, archived),
     [files, reports, archived],
@@ -275,10 +260,23 @@ function App() {
     action().catch((e) => setNotice(String(e)));
   };
   async function persist(value: Settings) {
-    const saved = await invoke<Settings>("save_settings", { value });
-    setSettings(saved);
+    const revision = ++settingsRevision.current;
+    const previous = settings;
+    setSettings(value);
+    // Keep rapid checkbox changes in order, including slow/offline settings validation.
+    const request = settingsSave.current
+      .catch(() => {})
+      .then(() => invoke<Settings>("save_settings", { value }));
+    settingsSave.current = request;
+    try {
+      const saved = await request;
+      if (settingsRevision.current === revision) setSettings(saved);
+    } catch (error) {
+      if (settingsRevision.current === revision) setSettings(previous);
+      throw error;
+    }
   }
-  async function scan(roots = settings.roots) {
+  async function scan(roots = checkedSources(settings)) {
     if (!roots.length) return;
     await persist({ ...settings, roots });
     pending.current.clear();
@@ -301,13 +299,26 @@ function App() {
       title: "Choose media sources",
     });
     if (choice) {
-      const roots = [
-        ...new Set([
-          ...settings.roots,
-          ...(Array.isArray(choice) ? choice : [choice]),
-        ]),
-      ];
-      await scan(roots);
+      const paths = Array.isArray(choice) ? choice : [choice];
+      await persist({
+        ...settings,
+        custom_folders: [
+          ...settings.custom_folders,
+          ...paths
+            .filter(
+              (path) =>
+                !settings.custom_folders.some((row) =>
+                  sameSource(row.path, path),
+                ),
+            )
+            .map((path) => ({
+              path,
+              checked: true,
+              offline: false,
+              volume: "",
+            })),
+        ],
+      });
     }
   }
   async function exportContent(name: string, content: string) {
@@ -351,6 +362,53 @@ function App() {
           <p>Media management for Avid Media Composer</p>
         </div>
         <div className="header-actions">
+          <details className="export-menu">
+            <summary>Export ▾</summary>
+            <div className="export-options">
+              {" "}
+              <label className="report-thumbnails">
+                <input
+                  type="checkbox"
+                  checked={includeThumbnails}
+                  onChange={(e) => setIncludeThumbnails(e.target.checked)}
+                />
+                Include thumbnails in HTML
+              </label>
+              <div className="summary-exports">
+                <button
+                  onClick={() =>
+                    run(() => exportContent("projects.csv", summaryCsv(files)))
+                  }
+                >
+                  CSV ↗
+                </button>
+                <button
+                  onClick={() =>
+                    run(async () => {
+                      const thumbnails =
+                        includeThumbnails && desktop
+                          ? await invoke<Record<string, string>>(
+                              "thumbnail_data",
+                              {
+                                clipIds: groupClips(files).map((c) => c.id),
+                              },
+                            )
+                          : undefined;
+                      await exportContent(
+                        "projects.html",
+                        summaryHtml(
+                          files,
+                          includeThumbnails ? thumbnails || {} : undefined,
+                        ),
+                      );
+                    })
+                  }
+                >
+                  HTML ↗
+                </button>
+              </div>
+            </div>
+          </details>
           <Operations
             disabled={!ready || busy}
             files={files}
@@ -368,210 +426,140 @@ function App() {
       </header>
       <div className="workspace">
         <aside>
-          <div className="section-label">
-            SOURCES <span>{settings.roots.length}</span>
-          </div>
+          <button
+            disabled={!ready || busy || searching}
+            title="Click to scan attached drives."
+            onClick={() => run(searchDatabases)}
+          >
+            Search for databases
+          </button>
+          {denied.map((volume) => (
+            <div className="permission-hint" key={volume.path}>
+              <strong>{volume.name} · Permission needed</strong>
+              <p className="hint">
+                Mob Boss doesn't have access to {volume.name}. Allow it in
+                System Settings › Privacy &amp; Security › Files and Folders.
+              </p>
+              <button
+                onClick={() => run(() => invoke("open_volume_permissions"))}
+              >
+                Open System Settings
+              </button>
+            </div>
+          ))}
           <button
             className="primary scan-button"
-            title="Add folder"
-            aria-label="Add folder"
-            disabled={!ready || busy}
-            onClick={() => run(pick)}
+            title="Click to initiate scanning for projects in the selected folders below."
+            disabled={
+              !ready || busy || searching || !checkedSources(settings).length
+            }
+            onClick={() => run(() => scan())}
           >
-            Add folder
+            Scan
           </button>
-          <div className="scan-options">
-            <label htmlFor="mode">Scan mode</label>
-            <select
-              id="mode"
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              disabled={busy}
-            >
-              <option value="quick">Quick</option>
-              <option value="auto">Auto</option>
-              <option value="deep">Deep</option>
-            </select>
-          </div>
-          <p className="hint">
-            {mode === "deep"
-              ? "Verify every MXF header."
-              : mode === "auto"
-                ? "Adapt scanning to each media folder."
-                : "Show PMR inventory first, then fill in details."}
-          </p>
-          <div className="sources">
-            {settings.roots.map((root) => (
-              <div className="source" key={root}>
-                <button
-                  title={root}
-                  disabled={busy}
-                  onClick={() => setFilter("folder", root)}
-                >
-                  ▱ {root.split(/[\\/]/).pop() || root}
-                  {online && !online.some((p) => sameSource(p, root)) && (
-                    <small>offline</small>
+          <div className="rail-lists">
+            {(["mounted_sources", "custom_folders"] as const).map((kind) => (
+              <section key={kind}>
+                <div className="section-label">
+                  {kind === "mounted_sources"
+                    ? "Mounted Sources"
+                    : "Custom Folders"}
+                  {kind === "custom_folders" && (
+                    <button
+                      disabled={!ready || busy || searching}
+                      onClick={() => run(pick)}
+                    >
+                      Add folder
+                    </button>
                   )}
-                </button>
-                <button
-                  aria-label={`Remove source ${root}`}
-                  disabled={busy}
-                  onClick={() =>
-                    run(() =>
-                      persist({
-                        ...settings,
-                        roots: settings.roots.filter(
-                          (r) => !sameSource(r, root),
-                        ),
-                      }),
-                    )
-                  }
-                >
-                  ×
-                </button>
-              </div>
+                </div>
+                {settings[kind].map((row) => (
+                  <div
+                    className={`source-row ${row.offline ? "offline" : ""}`}
+                    key={row.path}
+                  >
+                    <label title={row.path}>
+                      <input
+                        type="checkbox"
+                        checked={row.checked}
+                        disabled={busy || searching}
+                        onChange={(e) =>
+                          run(() =>
+                            persist({
+                              ...settings,
+                              [kind]: settings[kind].map((r) =>
+                                sameSource(r.path, row.path)
+                                  ? { ...r, checked: e.target.checked }
+                                  : r,
+                              ),
+                            }),
+                          )
+                        }
+                      />
+                      <span>
+                        {sourceLabel(row)}
+                        {row.offline && <small> offline</small>}
+                      </span>
+                    </label>
+                    <button
+                      aria-label={`Remove source ${row.path}`}
+                      disabled={busy || searching}
+                      onClick={() =>
+                        run(() =>
+                          persist({
+                            ...settings,
+                            [kind]: settings[kind].filter(
+                              (r) => !sameSource(r.path, row.path),
+                            ),
+                          }),
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </section>
             ))}
-          </div>
-          {settings.roots.length > 0 && (
+            <div className="section-label projects-label">
+              Projects <span>{summary.length}</span>
+            </div>
             <button
-              className="wide"
-              disabled={!ready || busy}
-              onClick={() => run(() => scan())}
+              className={`project ${!filters.projects.length ? "active" : ""}`}
+              onClick={() => setFilter("projects", [])}
             >
-              Rescan all sources
+              <span>All projects</span>
+              <small>
+                <span title={`${totalSize(files)} bytes`}>
+                  {bytes(totalSize(files))}
+                </span>
+              </small>
             </button>
-          )}
-          <details className="volumes" open>
-            <summary>Avid media found</summary>
-            <button
-              disabled={!ready || busy}
-              onClick={() => {
-                refreshRequested.current = true;
-                setDiscoveryRefresh((n) => n + 1);
-              }}
-            >
-              Refresh
-            </button>
-            {denied.map((volume) => (
-              <div className="found-source" key={volume.path}>
-                <strong>{volume.name} · Permission needed</strong>
-                <p className="hint">
-                  Mob Boss doesn't have access to {volume.name}. Allow it in
-                  System Settings › Privacy &amp; Security › Files and Folders.
-                </p>
-                <button
-                  onClick={() => run(() => invoke("open_volume_permissions"))}
-                >
-                  Open System Settings
-                </button>
-              </div>
-            ))}
-            {available.map((source) => (
-              <div className="found-source" key={source.path}>
-                <strong>▱ {source.volume}</strong>
-                <span className="found-path" title={source.path}>
-                  {source.path}
+            {summary.map((p) => (
+              <label
+                className={`project ${filters.projects.includes(p.name) ? "active" : ""}`}
+                key={p.name}
+              >
+                <span>
+                  <input
+                    type="checkbox"
+                    checked={filters.projects.includes(p.name)}
+                    onChange={(e) =>
+                      setFilter(
+                        "projects",
+                        e.target.checked
+                          ? [...filters.projects, p.name]
+                          : filters.projects.filter((n) => n !== p.name),
+                      )
+                    }
+                  />
+                  {p.name}
                 </span>
                 <small>
-                  {source.total > 0
-                    ? `${bytes(source.available)} free of ${bytes(source.total)}`
-                    : "Capacity unavailable"}
+                  <span title={`${p.size} bytes`}>{bytes(p.size)}</span>
                 </small>
-                <button
-                  disabled={busy}
-                  aria-label={`Add ${source.path}`}
-                  onClick={() =>
-                    run(() => scan([...settings.roots, source.path]))
-                  }
-                >
-                  Add
-                </button>
-              </div>
+              </label>
             ))}
-            {!available.length && !denied.length && (
-              <p className="hint">
-                No additional Avid media folders found on connected drives.
-              </p>
-            )}
-          </details>
-          <div className="section-label projects-label">
-            PROJECTS <span>{summary.length}</span>
-          </div>
-          <button
-            className={`project ${!filters.projects.length ? "active" : ""}`}
-            onClick={() => setFilter("projects", [])}
-          >
-            <span>All projects</span>
-            <small>
-              {files.length.toLocaleString()} ·{" "}
-              <span title={`${totalSize(files)} bytes`}>
-                {bytes(totalSize(files))}
-              </span>
-            </small>
-          </button>
-          {summary.map((p) => (
-            <label
-              className={`project ${filters.projects.includes(p.name) ? "active" : ""}`}
-              key={p.name}
-            >
-              <span>
-                <input
-                  type="checkbox"
-                  checked={filters.projects.includes(p.name)}
-                  onChange={(e) =>
-                    setFilter(
-                      "projects",
-                      e.target.checked
-                        ? [...filters.projects, p.name]
-                        : filters.projects.filter((n) => n !== p.name),
-                    )
-                  }
-                />
-                {p.name}
-              </span>
-              <small>
-                {p.count.toLocaleString()} files ·{" "}
-                <span title={`${p.size} bytes`}>{bytes(p.size)}</span>
-              </small>
-            </label>
-          ))}
-          <label className="report-thumbnails">
-            <input
-              type="checkbox"
-              checked={includeThumbnails}
-              onChange={(e) => setIncludeThumbnails(e.target.checked)}
-            />
-            Include thumbnails in HTML
-          </label>
-          <div className="summary-exports">
-            <button
-              onClick={() =>
-                run(() => exportContent("projects.csv", summaryCsv(files)))
-              }
-            >
-              CSV ↗
-            </button>
-            <button
-              onClick={() =>
-                run(async () => {
-                  const thumbnails =
-                    includeThumbnails && desktop
-                      ? await invoke<Record<string, string>>("thumbnail_data", {
-                          clipIds: groupClips(files).map((c) => c.id),
-                        })
-                      : undefined;
-                  await exportContent(
-                    "projects.html",
-                    summaryHtml(
-                      files,
-                      includeThumbnails ? thumbnails || {} : undefined,
-                    ),
-                  );
-                })
-              }
-            >
-              HTML ↗
-            </button>
           </div>
         </aside>
         <main>
@@ -884,6 +872,18 @@ function App() {
               reports must stay outside media sources.
             </p>
             <label>
+              Scan mode
+              <select
+                value={mode}
+                disabled={busy}
+                onChange={(e) => setMode(e.target.value)}
+              >
+                <option value="quick">Quick</option>
+                <option value="auto">Auto</option>
+                <option value="deep">Deep</option>
+              </select>
+            </label>
+            <label>
               Parallel header reads
               <input
                 type="number"
@@ -901,7 +901,7 @@ function App() {
             </label>
             <p className="hint">
               8 is the default. Mounted shares must be connected in Finder or
-              Explorer for their media folders to appear under Avid media found.
+              Explorer before clicking Search for databases.
             </p>
             <p className="hint">
               Playback stays in memory and is discarded when the app quits.
