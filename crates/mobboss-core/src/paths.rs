@@ -340,6 +340,8 @@ mod tests {
             checksum: "test".into(),
             status: "done".into(),
             guard: String::new(),
+            verified: String::new(),
+            algorithm: String::new(),
         };
         let mut csv = csv::Writer::from_writer(Vec::new());
         csv.serialize(&row).unwrap();

@@ -154,6 +154,9 @@ fn duplicate_move_keeps_source_and_logs_skip() {
     assert!(p.actions.iter().all(|a| a.duplicate));
     let out = f.execute(&p);
     assert_eq!(out.skipped, 3);
+    assert!(out.rows.iter().all(|r| r.verified == "matched existing"
+        && r.algorithm == "BLAKE3"
+        && !r.checksum.is_empty()));
     assert!(p.actions[0].source.exists());
 }
 #[test]
@@ -335,6 +338,10 @@ fn legacy_journal_spellings_resolve_against_canonical_index_paths() {
         .unwrap();
     }
     w.flush().unwrap();
+    let legacy_rows = ops::read_log(&log).unwrap();
+    assert!(legacy_rows
+        .iter()
+        .all(|r| r.verified.is_empty() && r.algorithm.is_empty()));
     let preview = ops::preview_undo(&f.index, &log).unwrap();
     assert_eq!(
         preview.rows.len(),
@@ -483,4 +490,36 @@ fn move_and_backup_requires_destination_before_any_transfer() {
     assert!(error.to_string().contains("explicit destination"));
     assert_eq!(tree(&f.root), before);
     assert_eq!(f.plan(Operation::Move).actions.len(), 3);
+}
+
+#[test]
+fn copy_and_same_drive_move_report_verification_and_append_columns() {
+    for (op, expected) in [
+        (Operation::Copy, "yes"),
+        (Operation::Move, "not needed (same-drive rename)"),
+    ] {
+        let mut f = Fixture::new();
+        let p = f.plan(op);
+        let out = f.execute(&p);
+        assert_eq!(out.rows.len(), 3);
+        assert!(out.rows.iter().all(|r| r.verified == expected));
+        for row in &out.rows {
+            if op == Operation::Copy {
+                assert_eq!(row.algorithm, "BLAKE3");
+                assert_eq!(row.checksum, ops::checksum(&row.dest).unwrap());
+            } else {
+                assert!(row.checksum.is_empty() && row.algorithm.is_empty());
+            }
+        }
+        let csv = fs::read_to_string(&out.logs[0]).unwrap();
+        assert_eq!(
+            csv.lines().next().unwrap(),
+            "op,source,dest,size,checksum,status,guard,verified,algorithm"
+        );
+        let logged = ops::read_log(&out.logs[0]).unwrap();
+        assert!(logged
+            .iter()
+            .filter(|r| r.status == "done")
+            .all(|r| r.verified == expected));
+    }
 }

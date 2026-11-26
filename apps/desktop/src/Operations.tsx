@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "./Dialog";
 import { bytes, requiresDestination, type MediaFile } from "./model";
+import { OperationResults, type ResultRow } from "./OperationResults";
 type Op = "move" | "copy" | "collect";
 const opLabel = (op: string) =>
   op === "collect" ? "Move & Backup" : op[0].toUpperCase() + op.slice(1);
@@ -28,6 +29,7 @@ interface Plan {
   conflicts: string[];
 }
 interface Result {
+  rows: ResultRow[];
   logs: string[];
   completed: number;
   skipped: number;
@@ -140,7 +142,9 @@ export default function Operations({
         paths: selected.size
           ? [...selected]
           : files
-              .filter((f) => (f.metadata.project || "Unknown project") === project)
+              .filter(
+                (f) => (f.metadata.project || "Unknown project") === project,
+              )
               .map((f) => f.path),
         destination: destination || null,
       });
@@ -186,7 +190,9 @@ export default function Operations({
   }
   const operationFiles = selected.size
     ? files.filter((f) => selected.has(f.path))
-    : files.filter((f) => (f.metadata.project || "Unknown project") === project);
+    : files.filter(
+        (f) => (f.metadata.project || "Unknown project") === project,
+      );
   const needsDestination = requiresDestination(operationFiles);
   const missingDestination =
     (op !== "move" || needsDestination) && !destination.trim();
@@ -527,10 +533,7 @@ export default function Operations({
             )}
             {stage === "result" && result && (
               <>
-                <p className="result-count">
-                  {result.completed} completed · {result.skipped} skipped
-                  {result.cancelled ? " · Cancelled" : ""}
-                </p>
+                <OperationResults result={result} />
                 <ul className="operation-warnings">
                   {result.warnings.map((w, i) => (
                     <li key={i}>{w}</li>

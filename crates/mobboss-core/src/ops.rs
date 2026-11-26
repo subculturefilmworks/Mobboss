@@ -254,6 +254,10 @@ pub struct LogRow {
     pub status: String,
     #[serde(default)]
     pub guard: String,
+    #[serde(default)]
+    pub verified: String,
+    #[serde(default)]
+    pub algorithm: String,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
@@ -266,6 +270,7 @@ pub struct Progress {
 pub struct Outcome {
     #[serde(serialize_with = "crate::paths::serialize_many")]
     pub logs: Vec<PathBuf>,
+    pub rows: Vec<LogRow>,
     pub completed: usize,
     pub skipped: usize,
     pub cancelled: bool,
@@ -302,6 +307,11 @@ impl Journal {
     fn row(&mut self, row: &LogRow) -> Result<()> {
         for (_, w) in &mut self.writers {
             let mut row = row.clone();
+            row.algorithm = if row.checksum.is_empty() {
+                String::new()
+            } else {
+                "BLAKE3".into()
+            };
             row.source = crate::paths::display(&row.source);
             row.dest = crate::paths::display(&row.dest);
             w.serialize(row)?;
@@ -562,6 +572,8 @@ fn transfer_with(
             "duplicate source or destination changed"
         );
         same_stat(&before, &action.source)?;
+        row.verified = "matched existing".into();
+        row.algorithm = "BLAKE3".into();
         row.status = "duplicate".into();
         journal.row(row)?;
         return Ok(());
@@ -582,11 +594,13 @@ fn transfer_with(
         same_stat(&before, &action.source)?;
         match rename_logged(&action.source, &action.dest, journal, row)? {
             RenameResult::Renamed => {
+                row.verified = "not needed (same-drive rename)".into();
                 row.status = "done".into();
                 journal.row(row)?;
                 return Ok(());
             }
             RenameResult::Linked => {
+                row.verified = "not needed (same-drive rename)".into();
                 row.status = "published".into();
                 journal.row(row)?;
                 same_stat(&before, &action.source)?;
@@ -625,8 +639,12 @@ fn transfer_with(
         output.sync_all()?;
         after_copy(&partial)?;
         ensure!(
-            regular(&partial)?.len() == size && checksum(&partial)? == hash,
-            "copy verification failed; source retained"
+            regular(&partial)
+                .context("Copy failed verification — original kept")?
+                .len()
+                == size
+                && checksum(&partial).context("Copy failed verification — original kept")? == hash,
+            "Copy failed verification — original kept"
         );
         same_stat(&before, &action.source)?;
         row.checksum = hash;
@@ -639,6 +657,8 @@ fn transfer_with(
         }
         // Keep the publication guard while identifying this as a verified copy.
         row.guard = format!("verified-copy; {}", row.guard);
+        row.verified = "yes".into();
+        row.algorithm = "BLAKE3".into();
         row.status = "published".into();
         journal.row(row)?;
         if action.op == Operation::Move {
@@ -688,6 +708,7 @@ pub fn execute(
     let mut journal = Journal::new(&plan.log_dirs, app_data)?;
     let mut outcome = Outcome {
         logs: journal.paths(),
+        rows: vec![],
         completed: 0,
         skipped: 0,
         cancelled: false,
@@ -718,6 +739,8 @@ pub fn execute(
             checksum: a.checksum.clone(),
             status: String::new(),
             guard: String::new(),
+            verified: String::new(),
+            algorithm: String::new(),
         };
         let result = if a.step > 0 && failed.contains(&a.file.path) {
             Err(anyhow::anyhow!("dependent collect step skipped"))
@@ -773,6 +796,12 @@ pub fn execute(
                 journal.row(&row)?;
             }
         }
+        row.algorithm = if row.checksum.is_empty() {
+            String::new()
+        } else {
+            "BLAKE3".into()
+        };
+        outcome.rows.push(row);
     }
     progress(Progress {
         done: outcome.completed + outcome.skipped,
@@ -923,6 +952,7 @@ pub fn undo(
     let mut journal = Journal::new(&log_dirs.into_iter().collect::<Vec<_>>(), app_data)?;
     let mut outcome = Outcome {
         logs: journal.paths(),
+        rows: vec![],
         completed: 0,
         skipped: 0,
         cancelled: false,
@@ -943,6 +973,9 @@ pub fn undo(
             total,
             source: row.dest.clone(),
         });
+        let mut reported = row.clone();
+        reported.op = "undo".into();
+        reported.verified.clear();
         let result = (|| -> Result<()> {
             safe_path(&row.source)?;
             safe_path(&row.dest)?;
@@ -973,6 +1006,8 @@ pub fn undo(
                 checksum: row.checksum.clone(),
                 status: "intent".into(),
                 guard: String::new(),
+                verified: String::new(),
+                algorithm: String::new(),
             };
             if row.op == "copy" {
                 journal.row(&undo_row)?;
@@ -999,6 +1034,7 @@ pub fn undo(
             }
             undo_row.status = "done".into();
             journal.row(&undo_row)?;
+            reported = undo_row;
             for p in [&row.source, &row.dest] {
                 let folder = p.parent().unwrap().to_path_buf();
                 if !outcome.touched.contains(&folder) {
@@ -1008,8 +1044,12 @@ pub fn undo(
             Ok(())
         })();
         match result {
-            Ok(()) => outcome.completed += 1,
+            Ok(()) => {
+                reported.status = "done".into();
+                outcome.completed += 1;
+            }
             Err(e) => {
+                reported.status = format!("skipped: {e}");
                 outcome.skipped += 1;
                 outcome.warnings.push(format!(
                     "{}: {e}",
@@ -1017,6 +1057,12 @@ pub fn undo(
                 ));
             }
         }
+        reported.algorithm = if reported.checksum.is_empty() {
+            String::new()
+        } else {
+            "BLAKE3".into()
+        };
+        outcome.rows.push(reported);
     }
     Ok(outcome)
 }
@@ -1075,8 +1121,10 @@ mod tests {
             checksum: action.checksum.clone(),
             status: String::new(),
             guard: String::new(),
+            verified: String::new(),
+            algorithm: String::new(),
         };
-        assert!(transfer_with(
+        let error = transfer_with(
             &action,
             &mut journal,
             &mut row,
@@ -1089,13 +1137,18 @@ mod tests {
                 // Same size, different bytes: this must fail the checksum, not just size.
                 fs::write(partial, "bad copy")?;
                 Ok(())
-            }
+            },
         )
-        .is_err());
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Copy failed verification — original kept"
+        );
         assert_eq!(fs::read_to_string(source).unwrap(), "original");
         assert!(!dest.exists());
         assert!(!dest.with_file_name("dest.mxf.mobboss-partial").exists());
         assert_eq!(row.status, "intent");
+        assert!(row.verified.is_empty());
         assert!(read_log(&journal.paths()[0])
             .unwrap()
             .iter()
@@ -1301,6 +1354,8 @@ mod tests {
             checksum: String::new(),
             status: "intent".into(),
             guard: String::new(),
+            verified: String::new(),
+            algorithm: String::new(),
         };
         let result = rename_logged_with(
             &file.path,
@@ -1348,6 +1403,8 @@ mod tests {
             checksum: String::new(),
             status: String::new(),
             guard: String::new(),
+            verified: String::new(),
+            algorithm: String::new(),
         };
         let mut journal = Journal::new(&[], &dir.path().join("logs")).unwrap();
         transfer(&action, &mut journal, &mut row, false).unwrap();
