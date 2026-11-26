@@ -17,13 +17,17 @@ run('ditto', ['target/universal-apple-darwin/release/bundle/macos/Mob Boss.app',
 symlinkSync('/Applications', `${stage}/Applications`);
 cpSync('docs/packaging/macos/How to open Mob Boss.txt', `${stage}/How to open Mob Boss.txt`);
 run('hdiutil', ['create', '-ov', '-volname', 'Mob Boss', '-srcfolder', stage, '-format', 'UDRW', image]);
-run('hdiutil', ['attach', '-nobrowse', '-mountpoint', mount, image]);
+// Finder must see the volume to arrange it, so do not pass -nobrowse.
+run('hdiutil', ['attach', '-mountpoint', mount, image]);
 try {
   const { width, height } = layout.windowSize;
   const app = layout.appPosition;
   const applications = layout.applicationFolderPosition;
   // App and Applications retain the standard Tauri positions. The note is on a
   // separate centered row, with space for its full filename below the icon.
+  // The Finder layout is cosmetic: if Finder scripting is unavailable on the
+  // runner, keep the default layout rather than failing the release.
+  try {
   run('osascript', ['-e', `tell application "Finder"
     tell disk "Mob Boss"
       open
@@ -43,8 +47,16 @@ try {
       close
     end tell
   end tell`]);
+  } catch (error) {
+    console.warn(`::warning::DMG Finder layout skipped: ${error.message}`);
+  }
 } finally {
-  run('hdiutil', ['detach', mount]);
+  // Finder can hold the volume briefly after closing its window.
+  try {
+    run('hdiutil', ['detach', mount]);
+  } catch {
+    run('hdiutil', ['detach', '-force', mount]);
+  }
 }
 run('hdiutil', ['convert', image, '-format', 'UDZO', '-ov', '-o', output]);
 run('hdiutil', ['verify', output]);
