@@ -535,7 +535,7 @@ function App() {
         </div>
         <div className="brand">
           <h1 title={buildVersion}>Mob Boss</h1>
-          <p>Media management for Avid Media Composer</p>
+          <p>MXF media management for Avid editors</p>
         </div>
         <div className="header-actions">
           <details className="export-menu">

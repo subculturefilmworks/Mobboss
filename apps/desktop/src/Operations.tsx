@@ -465,7 +465,7 @@ export default function Operations({
             {stage === "confirm" && (
               <>
                 <div className="quit-warning">
-                  <strong>Quit Media Composer before moving media</strong>
+                  <strong>Quit Avid before moving media</strong>
                   <p>
                     Close Avid on every computer using these files before
                     continuing.
@@ -487,7 +487,7 @@ export default function Operations({
                     checked={sure}
                     onChange={(e) => setSure(e.target.checked)}
                   />
-                  Yes, I’m sure. Media Composer is closed.
+                  Yes, I’m sure. Avid is closed.
                 </label>
                 <div className="modal-actions">
                   <button onClick={() => setStage("preview")}>
