@@ -251,6 +251,8 @@ aside {
 }
 main {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -320,7 +322,7 @@ h2 {
   border-radius: 8px;
   flex: 1;
   display: flex;
-  min-height: 150px;
+  min-height: 0;
   flex-direction: column;
   overflow: hidden;
   background: var(--panel);
@@ -365,6 +367,7 @@ h2 {
   font-size: 12px;
 }
 .table-scroll {
+  min-height: 0;
   overflow: auto;
   flex: 1;
   position: relative;
@@ -468,11 +471,15 @@ h2 {
   line-height: 1.8;
 }
 .notice {
+  position: relative;
   padding: 12px 0;
   color: var(--muted);
   font-size: 10px;
-  max-height: 150px;
-  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .notice:empty {
   padding: 8px;
@@ -482,6 +489,7 @@ h2 {
   overflow-wrap: anywhere;
 }
 footer {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 24px;
@@ -846,6 +854,7 @@ progress {
   color: var(--muted);
 }
 .clip-grid {
+  min-height: 0;
   overflow: auto;
   flex: 1;
   display: grid;
@@ -1427,4 +1436,40 @@ aside {
 }
 [data-source-kind="mounted_sources"] .source-row {
   padding-left: 24px;
+}
+
+/* Only the active table gives up space when the window or status area changes. */
+main > :not(.table-section):not(.empty-selection) {
+  flex-shrink: 0;
+}
+.empty-selection {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.notice > details > pre {
+  max-height: 150px;
+  overflow: auto;
+}
+.scan-details-scroll {
+  max-height: 40vh;
+  overflow: auto;
+}
+.scan-details {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Open above the status line so diagnostics never consume the table viewport. */
+.scan-details-scroll {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px #0003;
 }
