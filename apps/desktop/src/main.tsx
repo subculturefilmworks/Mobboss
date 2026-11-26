@@ -1018,6 +1018,15 @@ function App() {
               </button>
             </div>
             <p className="hint build-version">{buildVersion}</p>
+            <p className="hint">
+              <a href="https://ko-fi.com/cinemasamurai" onClick={(event) => {
+                event.preventDefault();
+                import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                  openUrl("https://ko-fi.com/cinemasamurai")
+                ).catch((error) => setNotice(String(error)));
+              }}>Support Mob Boss ☕</a>{" "}
+              <span>by Cinema Samurai</span>
+            </p>
           </section>
         </div>
       )}
