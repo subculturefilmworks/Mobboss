@@ -1,0 +1,9 @@
+How to open Mob Boss on Windows
+
+1. Unzip the download first. Don't run Mob Boss inside the ZIP.
+2. Double-click MobBoss.exe in the extracted folder.
+3. If you see “Windows protected your PC”, click More info → Run anyway.
+
+Mob Boss is free software without a paid code-signing certificate, so Windows may show this warning.
+
+Mob Boss is free. If it saves you time, you can say thanks at ko-fi.com/cinemasamurai ☕

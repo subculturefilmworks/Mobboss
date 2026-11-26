@@ -285,6 +285,7 @@ fn reveal(path: PathBuf, state: State<AppState>) -> Reply<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .register_asynchronous_uri_scheme_protocol("preview", crate::stream::protocol)
         .on_window_event(|window, event| {
             if matches!(

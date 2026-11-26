@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     version = env!("MOBBOSS_VERSION"),
-    about = "Mob Boss — Avid media inventory and verified collection"
+    about = "Mob Boss — MXF media management for Avid editors"
 )]
 struct Args {
     #[arg(
@@ -29,7 +29,7 @@ struct TransferArgs {
     project: String,
     #[arg(long)]
     dest: Option<PathBuf>,
-    /// Execute the displayed plan. Quit Media Composer first.
+    /// Execute the displayed plan. Quit Avid first.
     #[arg(long)]
     yes: bool,
     /// Emit the complete machine-readable plan/result instead of a readable summary.
@@ -137,7 +137,7 @@ fn main() -> Result<()> {
             } else {
                 println!("{}", plan_summary(&plan));
             }
-            eprintln!("Quit Media Composer before moving media. Avid will rebuild its media databases on next launch.");
+            eprintln!("Quit Avid before moving media. Avid will rebuild its media databases on next launch.");
             if a.yes && !preview {
                 let data = default_index()?.parent().unwrap().to_path_buf();
                 let result = mobboss_core::ops::execute(&mut index, &plan, &data, &cancel, |p| {
@@ -173,7 +173,7 @@ fn main() -> Result<()> {
                     println!("Warning: {warning}");
                 }
             }
-            eprintln!("Quit Media Composer before undo. Copies are deleted only if their checksum still matches.");
+            eprintln!("Quit Avid before undo. Copies are deleted only if their checksum still matches.");
             if yes {
                 let data = default_index()?.parent().unwrap().to_path_buf();
                 let result = mobboss_core::ops::undo(&mut index, &log, &data, &cancel, |p| {

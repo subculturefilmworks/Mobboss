@@ -1,0 +1,10 @@
+How to open Mob Boss on Mac
+
+1. Drag Mob Boss to Applications.
+2. In Applications, right-click (Control-click) Mob Boss → Open → Open.
+3. On macOS 15 or later, if blocked, go to System Settings → Privacy & Security → Open Anyway, then confirm Open.
+
+Mob Boss is free software and is not paid-signed with Apple (the app uses an ad-hoc signature).
+When macOS asks for drive or folder access, click Allow. It may ask again after an update.
+
+Mob Boss is free. If it saves you time, you can say thanks at ko-fi.com/cinemasamurai ☕

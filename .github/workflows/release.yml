@@ -60,10 +60,13 @@ jobs:
           # Includes all unit/integration/doc tests, planners, transfers and codec gates.
           cargo test -p mobboss-core --all-targets -- --nocapture
           cargo test -p mobboss-core --doc
-      - name: Build ad-hoc signed universal Mac app and disk image
+      - name: Build ad-hoc signed universal Mac app
         if: runner.os == 'macOS'
-        run: npm run tauri -- build --target universal-apple-darwin --bundles app,dmg
+        run: npm run tauri -- build --target universal-apple-darwin --bundles app
         working-directory: apps/desktop
+      - name: Package Mac disk image with opening instructions
+        if: runner.os == 'macOS'
+        run: node scripts/package-dmg.mjs
       - name: Verify Mac app and bundled ffmpeg signatures
         if: runner.os == 'macOS'
         shell: bash
@@ -90,6 +93,7 @@ jobs:
           New-Item -ItemType Directory -Path "$stage/licenses" -Force | Out-Null
           Copy-Item 'target/x86_64-pc-windows-msvc/release/MobBoss.exe' "$stage/MobBoss.exe"
           Copy-Item 'apps/desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe' "$stage/ffmpeg.exe"
+          Copy-Item 'docs/packaging/windows/How to open Mob Boss.txt' "$stage/How to open Mob Boss.txt"
           Copy-Item 'THIRD-PARTY-NOTICES.md' "$stage/THIRD-PARTY-NOTICES.md"
           Copy-Item 'docs/licenses/*' "$stage/licenses/"
           Copy-Item 'apps/desktop/src-tauri/binaries/FFmpeg-Windows-LICENSE.txt' "$stage/licenses/"
@@ -101,11 +105,11 @@ jobs:
         shell: bash
         run: |
           du -sk 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app'
-          stat -f '%N: %z bytes' target/MobBoss-macOS-universal.app.zip target/universal-apple-darwin/release/bundle/dmg/*.dmg apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin
+          stat -f '%N: %z bytes' target/MobBoss-macOS-universal.app.zip target/MobBoss-macOS.dmg apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin
           {
             echo '### macOS bundle sizes'
             du -sk 'target/universal-apple-darwin/release/bundle/macos/Mob Boss.app'
-            stat -f '%N: %z bytes' target/MobBoss-macOS-universal.app.zip target/universal-apple-darwin/release/bundle/dmg/*.dmg apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin
+            stat -f '%N: %z bytes' target/MobBoss-macOS-universal.app.zip target/MobBoss-macOS.dmg apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'
@@ -113,7 +117,7 @@ jobs:
           name: MobBoss-macOS-universal-adhoc
           path: |
             target/MobBoss-macOS-universal.app.zip
-            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/MobBoss-macOS.dmg
           if-no-files-found: error
           retention-days: 7
       - uses: actions/upload-artifact@v4
@@ -142,3 +146,32 @@ jobs:
               core.warning('Portable Windows ZIP exceeds 60 MB; report size for minimal-build review.');
               await core.summary.addRaw(' — Above 60 MB: consider a minimal Windows ffmpeg build in a later round.').write();
             }
+
+  publish:
+    needs: desktop
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-rc')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: MobBoss-macOS-universal-adhoc
+          path: macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: MobBoss-Windows-portable
+          path: windows
+      - name: Prepare stable release filenames
+        run: |
+          mkdir release
+          cp macos/MobBoss-macOS.dmg release/MobBoss-macOS.dmg
+          cd windows
+          zip -r ../release/MobBoss-Windows.zip .
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/MobBoss-macOS.dmg
+            release/MobBoss-Windows.zip
+          fail_on_unmatched_files: true

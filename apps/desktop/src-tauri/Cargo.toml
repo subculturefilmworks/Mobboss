@@ -11,7 +11,7 @@ path = "src/main.rs"
 required-features = ["desktop"]
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-opener"]
 [dependencies]
 mobboss-core = { path = "../../../crates/mobboss-core" }
 base64 = "0.22"
@@ -22,5 +22,6 @@ fs2 = "0.4"
 sysinfo = { version = "0.33", default-features = false, features = ["disk"] }
 tauri = { version = "2", optional = true , features = ["protocol-asset"] }
 tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }
