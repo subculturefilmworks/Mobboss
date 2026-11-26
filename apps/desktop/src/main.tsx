@@ -530,7 +530,9 @@ function App() {
   return (
     <div className="app">
       <header>
-        <div className="brand-icon">M</div>
+        <div className="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 14.2 7.3 7.6c.2-1 1-1.6 2-1.4l1.6.5c.7.2 1.5.2 2.2 0l1.6-.5c1-.2 1.8.4 2 1.4L18 14.2c-1.8.5-3.8.7-6 .7s-4.2-.2-6-.7z"/><path d="M1.5 16.3c0-1.6 4.7-2.6 10.5-2.6s10.5 1 10.5 2.6c0 1.1-4.7 2-10.5 2s-10.5-.9-10.5-2z"/></svg>
+        </div>
         <div className="brand">
           <h1 title={buildVersion}>Mob Boss</h1>
           <p>Media management for Avid Media Composer</p>
