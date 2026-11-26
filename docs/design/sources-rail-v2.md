@@ -12,7 +12,15 @@ Add folder without scanning; Scan disabled with no checked sources; and the exac
 checked paths submitted for scanning. It also checks the All projects
 all/none/mixed states and label reset, Mounted Sources without remove buttons,
 Custom Folders with remove buttons, and single-line rows plus table fit at
-1280 and 1024 px. The rail stays 320 px wide at both sizes. Rust separately tests
+1280 and 1024 px. The rail defaults to 320 px at both sizes. Drag its edge to resize between
+240 px and 45% of the window; the width persists locally, and double-click resets
+it. The keyboard handle supports Left/Right and Home. Mounted drives start
+collapsed and retain expansion during the session. Drive checkboxes select
+all/none and show a dash for partial selection. New folders inherit a fully
+ticked drive; partial or unticked drives leave new folders unticked, while
+remembered path ticks take precedence. Custom folders remain flat. Browser
+coverage also checks resize persistence and reset, collapsed startup and the
+existing scoped-selection checks. Rust separately tests
 the command's checked root selection, serialized tick memory without mounted rows,
 and recursive Custom Folder scanning in Quick/Auto/Deep modes. On Unix the
 recursive test also includes directory and file symlinks and verifies neither

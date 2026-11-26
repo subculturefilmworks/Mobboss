@@ -1,7 +1,16 @@
 import { buildVersion } from "./version";
-import SourcePath from "./SourcePath";
+
 import SoloFolder from "./SoloFolder";
 import {
+  groupSources,
+  driveCheckState,
+  toggleDrive,
+  shortSourceLabel,
+  DEFAULT_RAIL_WIDTH,
+  MIN_RAIL_WIDTH,
+  clampRailWidth,
+  readRailWidth,
+  saveRailWidth,
   mergeSources,
   rememberMounted,
   projectCheckState,
@@ -58,6 +67,87 @@ const emptyFilters: Filters = {
   diff: "",
 };
 function App() {
+  const rail = useRef<HTMLElement>(null);
+  const [expandedDrives, setExpandedDrives] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const node = rail.current!;
+    let width = readRailWidth(localStorage, window.innerWidth);
+    const apply = () => {
+      width = clampRailWidth(width, window.innerWidth);
+      node.style.flexBasis = width + "px";
+      node.nextElementSibling?.setAttribute(
+        "aria-valuenow",
+        String(Math.round(width)),
+      );
+    };
+    const handle = node.nextElementSibling as HTMLElement;
+    let start: { x: number; width: number } | null = null;
+    let frame = 0;
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      start = { x: event.clientX, width };
+      handle.setPointerCapture(event.pointerId);
+      document.body.classList.add("resizing-rail");
+      event.preventDefault();
+    };
+    const move = (event: PointerEvent) => {
+      if (!start) return;
+      width = clampRailWidth(
+        start.width + event.clientX - start.x,
+        window.innerWidth,
+      );
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(apply);
+    };
+    const finish = () => {
+      if (!start) return;
+      start = null;
+      cancelAnimationFrame(frame);
+      apply();
+      saveRailWidth(localStorage, width, window.innerWidth);
+      document.body.classList.remove("resizing-rail");
+    };
+    const reset = () => {
+      width = saveRailWidth(
+        localStorage,
+        DEFAULT_RAIL_WIDTH,
+        window.innerWidth,
+      );
+      apply();
+    };
+    const key = (event: KeyboardEvent) => {
+      if (!["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
+      event.preventDefault();
+      width = saveRailWidth(
+        localStorage,
+        event.key === "Home"
+          ? DEFAULT_RAIL_WIDTH
+          : width + (event.key === "ArrowRight" ? 16 : -16),
+        window.innerWidth,
+      );
+      apply();
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    handle.addEventListener("pointerdown", down);
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("lostpointercapture", finish);
+    handle.addEventListener("dblclick", reset);
+    handle.addEventListener("keydown", key);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.body.classList.remove("resizing-rail");
+      window.removeEventListener("resize", apply);
+      handle.removeEventListener("pointerdown", down);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("lostpointercapture", finish);
+      handle.removeEventListener("dblclick", reset);
+      handle.removeEventListener("keydown", key);
+    };
+  }, []);
+
   const [player, setPlayer] = useState<Clip | null>(null);
   const [files, setFiles] = useState<MediaFile[]>([]);
   const previews = usePreviews(desktop, files);
@@ -286,6 +376,58 @@ function App() {
   const run = (action: () => Promise<unknown>) => {
     action().catch((e) => setNotice(String(e)));
   };
+  function renderSource(
+    row: Settings["mounted_sources"][number],
+    kind: "mounted_sources" | "custom_folders",
+  ) {
+    return (
+      <div
+        className={`source-row ${row.offline ? "offline" : ""}`}
+        key={row.path}
+      >
+        <label title={row.path}>
+          <input
+            type="checkbox"
+            checked={row.checked}
+            disabled={busy || searching}
+            onChange={(e) =>
+              run(() =>
+                persist({
+                  ...settings,
+                  [kind]: settings[kind].map((r) =>
+                    sameSource(r.path, row.path)
+                      ? { ...r, checked: e.target.checked }
+                      : r,
+                  ),
+                }),
+              )
+            }
+          />
+          <span className="source-path" title={row.path}>
+            {shortSourceLabel(row.path, kind === "mounted_sources")}
+          </span>
+        </label>
+        {kind === "custom_folders" && (
+          <button
+            aria-label={`Remove source ${row.path}`}
+            disabled={busy || searching}
+            onClick={() =>
+              run(() =>
+                persist({
+                  ...settings,
+                  [kind]: settings[kind].filter(
+                    (r) => !sameSource(r.path, row.path),
+                  ),
+                }),
+              )
+            }
+          >
+            ×
+          </button>
+        )}
+      </div>
+    );
+  }
   async function persist(value: Settings) {
     value = {
       ...value,
@@ -461,7 +603,7 @@ function App() {
         </div>
       </header>
       <div className="workspace">
-        <aside>
+        <aside ref={rail} id="sources-rail">
           <button
             disabled={!ready || busy || searching}
             title="Click to scan attached drives."
@@ -528,51 +670,63 @@ function App() {
                     </button>
                   )}
                 </div>
-                {settings[kind].map((row) => (
-                  <div
-                    className={`source-row ${row.offline ? "offline" : ""}`}
-                    key={row.path}
-                  >
-                    <label title={row.path}>
-                      <input
-                        type="checkbox"
-                        checked={row.checked}
-                        disabled={busy || searching}
-                        onChange={(e) =>
-                          run(() =>
-                            persist({
-                              ...settings,
-                              [kind]: settings[kind].map((r) =>
-                                sameSource(r.path, row.path)
-                                  ? { ...r, checked: e.target.checked }
-                                  : r,
-                              ),
-                            }),
-                          )
-                        }
-                      />
-                      <SourcePath row={row} />
-                    </label>
-                    {kind === "custom_folders" && (
-                      <button
-                        aria-label={`Remove source ${row.path}`}
-                        disabled={busy || searching}
-                        onClick={() =>
-                          run(() =>
-                            persist({
-                              ...settings,
-                              [kind]: settings[kind].filter(
-                                (r) => !sameSource(r.path, row.path),
-                              ),
-                            }),
-                          )
-                        }
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                ))}
+                {kind === "mounted_sources" &&
+                  groupSources(settings.mounted_sources).map((group) => {
+                    const state = driveCheckState(group.rows);
+                    const expanded = expandedDrives.has(group.key);
+                    return (
+                      <div key={group.key}>
+                        <div
+                          className={`drive-row ${group.rows.every((row) => row.offline) ? "offline" : ""}`}
+                        >
+                          <button
+                            aria-label={`${expanded ? "Collapse" : "Expand"} ${group.name}`}
+                            aria-expanded={expanded}
+                            onClick={() =>
+                              setExpandedDrives((old) => {
+                                const next = new Set(old);
+                                if (next.has(group.key)) next.delete(group.key);
+                                else next.add(group.key);
+                                return next;
+                              })
+                            }
+                          >
+                            {expanded ? "▾" : "▸"}
+                          </button>
+                          <label title={group.key}>
+                            <input
+                              type="checkbox"
+                              checked={state.checked}
+                              ref={(node) => {
+                                if (node)
+                                  node.indeterminate = state.indeterminate;
+                              }}
+                              disabled={busy || searching}
+                              onChange={(e) =>
+                                run(() =>
+                                  persist({
+                                    ...settings,
+                                    mounted_sources: toggleDrive(
+                                      settings.mounted_sources,
+                                      group.key,
+                                      e.target.checked,
+                                    ),
+                                  }),
+                                )
+                              }
+                            />
+                            <span>{group.name}</span>
+                          </label>
+                        </div>
+                        {expanded &&
+                          group.rows.map((row) =>
+                            renderSource(row, "mounted_sources"),
+                          )}
+                      </div>
+                    );
+                  })}
+                {kind === "custom_folders" &&
+                  settings[kind].map((row) => renderSource(row, kind))}
               </section>
             ))}
             <div className="section-label projects-label">
@@ -646,6 +800,17 @@ function App() {
             ))}
           </div>
         </aside>
+        <div
+          className="rail-resize"
+          role="separator"
+          aria-label="Resize sources rail"
+          aria-orientation="vertical"
+          aria-controls="sources-rail"
+          tabIndex={0}
+          aria-valuemin={MIN_RAIL_WIDTH}
+          aria-valuenow={DEFAULT_RAIL_WIDTH}
+          title="Drag to resize · Double-click to reset"
+        />
         <main>
           <div className="main-title">
             <div>
