@@ -1,3 +1,16 @@
+import {
+  groupSources,
+  driveCheckState,
+  toggleDrive,
+  shortSourceLabel,
+  pathKey,
+  readRailWidth,
+  saveRailWidth,
+  clampRailWidth,
+  DEFAULT_RAIL_WIDTH,
+  MIN_RAIL_WIDTH,
+  RAIL_WIDTH_KEY,
+} from "./sources";
 import { rememberMounted, middleEllipsis, projectCheckState } from "./sources";
 import { describe, expect, it } from "vitest";
 import {
@@ -186,4 +199,121 @@ it("uses a deduped union with path boundaries and Windows aliases, and reticks w
   expect(scopeFiles(files, [])).toEqual([]);
   expect(scopeFiles(files, ["E:/Story/Media"])).toEqual([files[0]]);
   expect(files).toHaveLength(3);
+});
+
+describe("drive groups and rail width", () => {
+  const row = (path: string, checked = true, volume = "Story Island") => ({
+    path,
+    checked,
+    volume,
+    offline: false,
+  });
+  it("groups by mount identity across Windows aliases and keeps distinct equally named volumes apart", () => {
+    const groups = groupSources([
+      row("E:/Avid MediaFiles/MXF/1"),
+      row("\\\\?\\E:\\Avid MediaFiles\\MXF\\desktop.1", false),
+      row("F:/Avid MediaFiles/MXF/1"),
+      row("//Paper/Share/Avid MediaFiles/MXF/1"),
+      row("//Paper/Share/Avid MediaFiles/MXF/2"),
+      row("/Volumes/Amber/Avid MediaFiles/MXF/1"),
+      row("/Volumes/Amber/Avid MediaFiles/MXF/2"),
+    ]);
+    expect(groups.map((group) => group.rows.length)).toEqual([2, 1, 2, 2]);
+    expect(driveCheckState(groups[0].rows)).toEqual({
+      checked: false,
+      indeterminate: true,
+    });
+    const checked = toggleDrive(
+      groups.flatMap((group) => group.rows),
+      "e:",
+      true,
+    );
+    expect(driveCheckState(checked.slice(0, 2))).toEqual({
+      checked: true,
+      indeterminate: false,
+    });
+    expect(
+      driveCheckState(toggleDrive(checked, "e:", false).slice(0, 2)),
+    ).toEqual({ checked: false, indeterminate: false });
+    expect(checked.slice(2)).toEqual(
+      groups.slice(1).flatMap((group) => group.rows),
+    );
+  });
+  it("inherits all, some, or none only for new paths and keeps explicit path memory", () => {
+    const paths = ["E:/Avid MediaFiles/MXF/1", "E:/Avid MediaFiles/MXF/2"];
+    const discovered = [...paths, "E:/Avid MediaFiles/MXF/3"].map((path) => ({
+      path,
+      volume: "Story Island",
+      available: 0,
+      total: 0,
+    }));
+    expect(
+      mergeSources(
+        paths.map((p) => row(p)),
+        discovered,
+      ).map((r) => r.checked),
+    ).toEqual([true, true, true]);
+    expect(
+      mergeSources(
+        paths.map((p, i) => row(p, i === 0)),
+        discovered,
+      ).map((r) => r.checked),
+    ).toEqual([true, false, false]);
+    expect(
+      mergeSources(
+        paths.map((p) => row(p, false)),
+        discovered,
+      ).map((r) => r.checked),
+    ).toEqual([false, false, false]);
+    expect(
+      mergeSources(
+        paths.map((p) => row(p)),
+        discovered,
+        { [pathKey(discovered[2].path)]: false },
+      )[2].checked,
+    ).toBe(false);
+    expect(shortSourceLabel(discovered[2].path, true)).toBe("MXF/3");
+    expect(
+      shortSourceLabel("/Volumes/Story/Backup/Media/Selected", false),
+    ).toBe("Backup/Media/Selected");
+  });
+  it("clamps widths, restores persisted values, resets, and handles unavailable storage", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    };
+    expect(readRailWidth(storage, 1200)).toBe(DEFAULT_RAIL_WIDTH);
+    expect(saveRailWidth(storage, 900, 1200)).toBe(540);
+    expect(readRailWidth(storage, 1200)).toBe(540);
+    expect(readRailWidth(storage, 800)).toBe(360);
+    expect(saveRailWidth(storage, 1, 1200)).toBe(MIN_RAIL_WIDTH);
+    expect(saveRailWidth(storage, DEFAULT_RAIL_WIDTH, 1200)).toBe(320);
+    values.set(RAIL_WIDTH_KEY, "broken");
+    expect(readRailWidth(storage, 1200)).toBe(320);
+    expect(clampRailWidth(NaN, 1200)).toBe(320);
+    expect(
+      readRailWidth(
+        {
+          getItem: () => {
+            throw Error();
+          },
+        },
+        1200,
+      ),
+    ).toBe(320);
+    expect(
+      saveRailWidth(
+        {
+          setItem: () => {
+            throw Error();
+          },
+        },
+        400,
+        1200,
+      ),
+    ).toBe(400);
+  });
 });

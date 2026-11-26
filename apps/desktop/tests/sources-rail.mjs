@@ -142,8 +142,12 @@ assert.equal(
     .then((t) => t.includes("Unknown project")),
   true,
 );
+assert.equal(await page.locator(".drive-row [aria-expanded=false]").count(), 3);
+await page
+  .getByRole("button", { name: "Expand Story-Island", exact: true })
+  .click();
 const storyTick = page
-  .locator('[data-source-kind="mounted_sources"] input')
+  .locator('[data-source-kind="mounted_sources"] .source-row input')
   .first();
 await storyTick.uncheck();
 assert.equal(await page.locator("label.project").count(), 0);
@@ -278,7 +282,9 @@ assert.equal(
   false,
 );
 assert.equal(
-  await page.locator('[data-source-kind="mounted_sources"] button').count(),
+  await page
+    .locator('[data-source-kind="mounted_sources"] .source-row button')
+    .count(),
   0,
 );
 assert.equal(
@@ -389,26 +395,49 @@ for (const width of [1280, 1024]) {
     }));
     assert.ok(box.height <= style.line + 1);
     assert.ok(style.title.startsWith("/Volumes/"));
-    assert.ok(style.text.startsWith("/Volumes/"));
-    if (style.title.includes("/MXF/"))
-      assert.ok(
-        style.text.endsWith(
-          style.title.match(/[/]MXF[/][^/]+$/i)?.[0] ||
-            style.title.slice(style.title.lastIndexOf("/")),
-        ),
-      );
+    assert.ok(!style.text.startsWith("/Volumes/"));
   }
 }
 await page.setViewportSize({ width: 1440, height: 900 });
 await projectTicks.first().check(); // Show the mixed state in both screenshots.
 await page.waitForTimeout(100);
 const railSize = await page.locator("aside").boundingBox();
-const dark = await page.locator("aside").screenshot();
+// Drag, restore on reload, reset, and verify session expansion survives rerenders.
+const handle = page.getByRole("separator", { name: "Resize sources rail" });
+const handleBox = await handle.boundingBox();
+await page.mouse.move(handleBox.x + 3, handleBox.y + 100);
+await page.mouse.down();
+await page.mouse.move(handleBox.x + 163, handleBox.y + 100, { steps: 12 });
+await page.mouse.up();
+assert.equal(
+  Math.round((await page.locator("aside").boundingBox()).width),
+  480,
+);
+await page.reload();
+await page.getByRole("button", { name: "Scan", exact: true }).waitFor();
+assert.equal(
+  Math.round((await page.locator("aside").boundingBox()).width),
+  480,
+);
+assert.equal(await page.locator(".drive-row [aria-expanded=true]").count(), 0);
+await handle.dblclick();
+assert.equal(
+  Math.round((await page.locator("aside").boundingBox()).width),
+  320,
+);
+await page
+  .getByRole("button", { name: "Expand Story-Island", exact: true })
+  .click();
+const captureRail = async () => {
+  const box = await page.locator("aside").boundingBox();
+  return page.screenshot({ clip: { ...box, width: box.width + 6 } });
+};
+const dark = await captureRail();
 await page.getByRole("button", { name: "☀ Light", exact: true }).click();
-const light = await page.locator("aside").screenshot();
+const light = await captureRail();
 const comparison = await browser.newPage({
   viewport: {
-    width: Math.ceil(railSize.width * 2 + 32),
+    width: Math.ceil((railSize.width + 6) * 2 + 32),
     height: Math.ceil(railSize.height + 48),
   },
 });
@@ -434,6 +463,8 @@ assert.equal(
   ),
   0,
 );
+while (await page.locator(".drive-row [aria-expanded=false]").count())
+  await page.locator(".drive-row [aria-expanded=false]").first().click();
 // Uncheck all: Scan must disable. Re-check just one mounted and one custom source.
 while (await page.locator(".source-row input:checked").count())
   await page.locator(".source-row input:checked").first().uncheck();
